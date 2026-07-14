@@ -124,7 +124,7 @@ RLDS language_instruction bytes
 运行前用当前环境中的常量发现真实路径：
 
 ```bash
-uv run --no-sync python - <<'PY'
+HF_HUB_OFFLINE=1 uv run --no-sync python - <<'PY'
 import os
 from pathlib import Path
 
@@ -172,7 +172,7 @@ df -h "$LIBERO_RLDS_DIR"
 `test -d` 失败时不要继续。文件系统检查只能说明“看起来像 TFDS 目录”；真正的读取契约仍要由 `tfds.load` 验证。下面只读取第一个 episode/step，不创建 LeRobot 输出：
 
 ```bash
-uv run --no-sync python - <<'PY'
+HF_HUB_OFFLINE=1 uv run --no-sync python - <<'PY'
 import os
 from pathlib import Path
 
@@ -374,7 +374,7 @@ uv run --no-sync examples/libero/convert_libero_data_to_lerobot.py \
 openpi 当前源码直接使用 `LeRobotDatasetMetadata.fps` 和 `.tasks`。不同 LeRobot 版本对 episode/frame 总数等公开属性的命名可能变化，因此先打印 `dir(meta)`，再用 `getattr` 检查候选属性：
 
 ```bash
-uv run --no-sync python - <<'PY'
+HF_HUB_OFFLINE=1 uv run --no-sync python - <<'PY'
 import inspect
 from collections.abc import Mapping
 from pathlib import Path
@@ -444,6 +444,8 @@ PY
 
 本地文档环境没有安装该固定 LeRobot commit，不能靠 import 预先证明构造签名；片段因此先检查 `inspect.signature`，只有确认 `root` 参数存在才构造对象。若断言失败，应根据打印出的固定版本签名调整**显式本地根目录**调用，不能删掉 `root` 参数让库静默查询 Hub。
 
+显式 `root=root` 固定了目标位置，但底层在发现 metadata、parquet 或视频索引缺失时，仍可能尝试从 Hub 补齐。本章所有 LeRobot 本地检查都在启动 Python **之前**设置 `HF_HUB_OFFLINE=1`：完整本地数据可以正常读取，残缺或损坏的输出会直接报错，不会联网下载，也不会在检查过程中改写 Hugging Face cache。
+
 `total_episodes`、`total_frames` 等计数字段仍用 `getattr` 探测，因为不同 LeRobot 版本可能采用不同公开名称；`fps`、`tasks` 和 `features` 则是本练习的硬契约。features 允许 LeRobot 自己添加 `timestamp`、`frame_index`、`episode_index`、`index`、`task_index` 等系统字段，但转换器负责的四个 key 必须完整存在，并逐一严格匹配 dtype/shape。不要把 `"<not exposed...>"` 当错误结论；它只适用于可选计数字段。
 
 ### 实践 6：检查 frame、数值、任务分布和图像方向
@@ -451,7 +453,7 @@ PY
 下面的检查会遍历这个小数据集，并把第一帧两路图像写到 `/tmp` 供人工查看；它不会修改仓库或上传 Hub：
 
 ```bash
-uv run --no-sync python - <<'PY'
+HF_HUB_OFFLINE=1 uv run --no-sync python - <<'PY'
 import inspect
 from collections import Counter
 from pathlib import Path
@@ -636,7 +638,7 @@ uv run --no-sync python -c 'import tensorflow, tensorflow_datasets, dlimp; print
 
 ### 8. 为什么 Hugging Face 要求登录？
 
-本地转换和本地检查都不需要 Hub 登录。检查片段会先断言 `root` 存在、核对构造签名，再显式传入 `root=root`；如果固定 API 不支持这个参数，片段会明确失败，而不是删掉参数后尝试 Hub。只有显式传入 `--push-to-hub`，程序才应执行上传 block，此时才需要 Hugging Face 身份验证、目标 namespace 权限，并需要重新判断 public/private 设置。若本章命令请求网络或认证，先检查 `root`、构造调用和完整命令。
+本地转换和本地检查都不需要 Hub 登录。检查片段用 `HF_HUB_OFFLINE=1` 禁止联网，再断言 `root` 存在、核对构造签名并显式传入 `root=root`；本地 metadata 缺失或固定 API 不支持该参数时，片段会明确失败，而不是下载文件或改写 cache。只有显式传入 `--push-to-hub`，程序才应执行上传 block，此时才需要 Hugging Face 身份验证、目标 namespace 权限，并需要重新判断 public/private 设置。若本章检查仍请求网络或认证，先确认环境变量位于 `uv run` 前、命令使用 `--no-sync`，再核对 `root` 和构造调用。
 
 ## 本章验收
 
@@ -646,7 +648,7 @@ uv run --no-sync python -c 'import tensorflow, tensorflow_datasets, dlimp; print
 - [ ] `tfds.load(..., download=False)` 只读预检能找到本地原始 split，并显示两路图像、8 维 state、7 维 action 和可解码语言；
 - [ ] 打印并人工确认精确 `HF_LEROBOT_HOME / REPO_NAME`，没有覆盖有价值的现有 repo id；
 - [ ] 教学版 `main()` 在 `rmtree` 前验证上限并打开/最小读取所有 source，错误 source 不会触发旧输出删除；
-- [ ] metadata/data 检查先断言本地 root 存在并验证两个构造器都支持 `root`，随后以 `root=root` 构造，没有 Hub 回退；
+- [ ] metadata/data 检查在 Python 启动前设置 `HF_HUB_OFFLINE=1`，再断言本地 root 存在并验证两个构造器都支持 `root`，随后以 `root=root` 构造；残缺输出会失败，没有 Hub 下载或 cache 改写；
 - [ ] schema 硬断言通过：两路 `image` feature 都是 `image[256,256,3]`，`state` 是 `float32[8]`，`actions` 是 `float32[7]`；
 - [ ] episode 数为 1–10（或与你显式选择的更小数量一致），边界与 frame 数可解释；
 - [ ] tasks 非空，`task_index` 能恢复文本，task 分布与源演示一致；
