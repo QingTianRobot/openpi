@@ -223,12 +223,13 @@ repo id 与 cache 布局不一致、metadata/data/video/index 不完整、运行
 **证据命令/日志**
 
 ```bash
-rg -n 'NUM_EPISODES|EPISODE_INDICES|push_to_hub|repo_id' examples/libero/convert_libero_data_to_lerobot.py
+rg -n 'REPO_NAME|RAW_DATASET_NAMES|max_episodes_per_dataset|push_to_hub' \
+  examples/libero/convert_libero_data_to_lerobot.py docs/tutorial/07_prepare_small_dataset.md
 git diff -- examples/libero/convert_libero_data_to_lerobot.py
 df -h .
 ```
 
-保存具体 episode/frame 索引、原始 key、shape/dtype、时间戳和首个非有限值；不要只保留聚合计数。
+仓库原始转换器用 `RAW_DATASET_NAMES` 选择 RLDS source，并用 `REPO_NAME` 决定 LeRobot 输出；第 07 章的小数据改动再向同一脚本的 `main()` 加入 `max_episodes_per_dataset`。若当前脚本中没有后者，说明限量转换改动尚未应用到这个 checkout，而不是 episode 上限“失效”。保存具体 episode/frame 索引、原始 key、shape/dtype、时间戳和首个非有限值；不要只保留聚合计数。
 
 **常见原因**
 
