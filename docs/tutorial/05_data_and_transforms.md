@@ -224,13 +224,15 @@ LIBERO 原始 action 已经是 delta action。`LeRobotLiberoDataConfig.extra_del
 
 ### action horizon、chunk、tokens 与 masks
 
-**Action horizon** 是模型一次覆盖多少个未来时间步。训练 data loader 根据它读取一段 action sequence；模型输出的 action chunk shape 是：
+**Action horizon** 是一次连续动作计划覆盖多少个未来时间步。训练 data loader 根据它读取一段 action sequence。对 π₀/π₀.₅，`sample_actions()` 的模型原生输出就是连续 action chunk：
 
 ```text
 (batch, action_horizon, action_dim)
 ```
 
-去掉单请求的 batch、裁回 LIBERO 维度后是 `(action_horizon, 7)`。第 03 章客户端的 `replan_steps=5` 只执行 chunk 前 5 步，而 `pi05_libero` 的 horizon 是 10；horizon 是模型预测长度，replan steps 是客户端实际使用长度，两者不是同一参数。
+π₀-FAST 不适用这条“模型原生输出 shape”：它的 `sample_actions()` 返回 token-ID 序列。针对一个请求，`ExtractFASTActions` 再按配置的 `action_horizon` 和 `action_dim` 将 token 解码为连续 `(H,D)`，之后才进入 `Unnormalize` 和环境输出适配。
+
+对本章的 π₀.₅ 路径，去掉单请求的 batch、裁回 LIBERO 维度后是 `(action_horizon, 7)`。第 03 章客户端的 `replan_steps=5` 只执行 chunk 前 5 步，而 `pi05_libero` 的 horizon 是 10；horizon 是连续计划长度，replan steps 是客户端实际使用长度，两者不是同一参数。
 
 **Image masks** 告诉模型某路图像是真实输入还是 padding。**Token mask** 告诉模型语言序列中哪些位置是真实 token、哪些是补齐。π₀-FAST 还需要 autoregressive mask 和 loss mask；普通 π₀/π₀.₅ 的 `Observation` 对这些字段可为 `None`。
 
