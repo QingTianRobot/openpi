@@ -261,7 +261,7 @@ host network 意味着端口冲突直接发生在宿主机。以 `ss` 的监听 
 ```bash
 ss -ltnp | rg ':8000\b'
 docker ps --format 'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}'
-read -r -p "输入候选容器名: " CONTAINER_NAME
+printf '输入候选容器名: '; read -r CONTAINER_NAME
 docker inspect --format '{{.Name}} pid={{.State.Pid}} network={{.HostConfig.NetworkMode}}' "$CONTAINER_NAME"
 docker logs --tail=100 "$CONTAINER_NAME"
 unset CONTAINER_NAME
