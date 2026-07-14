@@ -44,6 +44,7 @@
 - [ ] 计划使用 NVIDIA A100 或 H100，且当前用户能运行 `nvidia-smi`；
 - [ ] `uv --version` 能输出版本号；
 - [ ] `docker compose version` 能输出 Compose 版本；
+- [ ] 已准备运行一次真实的 Docker GPU smoke test；若暂缓镜像拉取，就把容器 GPU 状态记录为“未验证”，且不把 preflight 视为通过；
 - [ ] 当前目录是仓库根目录；
 - [ ] `df -h .` 显示至少 100 GB 可用空间；
 - [ ] 网络或代理允许 Git 访问 GitHub；
@@ -122,15 +123,45 @@ GIT_LFS_SKIP_SMUDGE=1
 
 ```text
 MUJOCO_GL=${MUJOCO_GL:-egl}
+PYOPENGL_PLATFORM=egl
 ```
 
-因此无额外配置时使用 EGL，这是无窗口/服务器环境更合适的默认路径。只有日志显示 EGL 初始化、设备选择或 NVIDIA EGL 库相关错误时，才尝试：
+因此无额外配置时使用 EGL，这是无窗口/服务器环境更合适的默认路径。上游 [LIBERO README](../../examples/libero/README.md) 给出的简写是：
 
 ```bash
 MUJOCO_GL=glx SERVER_ARGS="--env LIBERO" docker compose -f examples/libero/compose.yml up --build
 ```
 
-GLX 依赖 X11。它通常需要正确的 `DISPLAY`、挂载的 `/tmp/.X11-unix` 和允许容器连接 X server 的权限；官方 [LIBERO README](../../examples/libero/README.md) 给出了 `sudo xhost +local:docker`。该命令会放宽本机 X server 的访问权限，只应在确实使用 GLX、理解机器安全边界时执行，并在使用后按本机策略撤销。EGL 正常时不需要先执行 `xhost`。
+这条命令只把可展开的 `MUJOCO_GL` 改为 `glx`；当前基础 Compose 文件仍把 `PYOPENGL_PLATFORM` **硬编码为 `egl`**。因此它是上游提供的部分切换方式，不能保证 PyOpenGL 也完整切到 GLX。
+
+若日志证明需要完整 GLX 回退，可在仓库外创建临时 override，例如 `/tmp/openpi-libero-glx.override.yml`：
+
+```yaml
+services:
+  runtime:
+    environment:
+      MUJOCO_GL: glx
+      PYOPENGL_PLATFORM: glx
+```
+
+随后同时加载基础文件与 override：
+
+```bash
+SERVER_ARGS="--env LIBERO" docker compose \
+  -f examples/libero/compose.yml \
+  -f /tmp/openpi-libero-glx.override.yml \
+  up --build
+```
+
+Compose 会按环境变量名称合并配置，使 `runtime` 中的两个选择器都成为 `glx`。可以先把最后一行 `up --build` 临时换成 `config`，检查展开结果中两个变量是否都为 `glx`。
+
+GLX 依赖 X11。它通常需要正确的 `DISPLAY`、挂载的 `/tmp/.X11-unix` 和允许容器连接 X server 的权限；官方 [LIBERO README](../../examples/libero/README.md) 给出了 `sudo xhost +local:docker`。该命令会放宽本机 X server 的访问权限，只应在确实使用 GLX、理解机器安全边界时执行。使用结束后，通常由图形会话的所有者在同一个 `DISPLAY`/`XAUTHORITY` 上运行精确的反向命令：
+
+```bash
+xhost -local:docker
+```
+
+EGL 正常时不需要先执行 `xhost`。
 
 ## 源码地图
 
@@ -169,10 +200,18 @@ df -h .
 - `nvidia-smi` 应列出至少一张计划使用的 NVIDIA GPU，而不是驱动通信错误；
 - `uv --version` 应输出可识别的版本；
 - `docker compose version` 应表明 Compose 子命令可用；
-- `git submodule status` 的子模块行首若出现 `-`，表示尚未初始化；
+- `git submodule status` 中课程所需子模块的行首应为空格；`-` 表示未初始化，`+` 表示 checkout 与父仓库记录的 commit 不同，`U` 表示冲突；
 - `df -h .` 的 `Avail` 应至少为 100 GB，同时留意仓库和 Docker 数据目录可能不在同一文件系统。
 
-如果此时子模块行首是 `-`，不需要慌张：这正是下一步要修复的状态。若 `nvidia-smi`、Compose 或磁盘条件不满足，应先解决宿主机前置条件，避免在大型依赖安装或镜像构建中途才失败。
+如果此时子模块行首是 `-`，不需要慌张：这正是下一步要修复的状态。`+` 和 `U` 也不是标准通过状态；应先核对本地工作与预期 commit。若 `nvidia-smi`、Compose 或磁盘条件不满足，应先解决宿主机前置条件，避免在大型依赖安装或镜像构建中途才失败。
+
+Compose 命令存在还不能证明容器可以使用 GPU。运行一个不依赖本仓库镜像的 smoke test：
+
+```bash
+docker run --rm --gpus all nvidia/cuda:12.2.2-base-ubuntu22.04 nvidia-smi
+```
+
+首次运行可能需要从镜像仓库拉取 CUDA base image，因此会使用网络、时间和 Docker 磁盘。预期输出与宿主机 `nvidia-smi` 类似，并列出目标 GPU。若你决定暂缓拉取或运行，就必须把“Docker GPU 访问”记录为**未验证**，本章 preflight 也尚未完整通过。
 
 ### 实践 2：按仓库 README 安装主环境
 
@@ -205,7 +244,15 @@ uv run --no-sync python --version
 git submodule status
 ```
 
-所有需要的子模块行首都不应为 `-`。随后让已经安装好的 JAX 列出设备：
+课程标准要求所需子模块行首的第一个字符是**空格**，而不只是“没有 `-`”。三种非空白前缀的含义是：
+
+- `-`：子模块未初始化；
+- `+`：当前 checkout 与父仓库记录的 commit 不同；
+- `U`：子模块存在合并冲突。
+
+默认应把课程所需的 `third_party/libero` 等子模块对齐到父仓库记录的 commit。若你有意保留非空白状态，继续前必须记录子模块路径、前缀、实际 commit、偏离原因和对后续课程的影响；它属于有意识的例外，不应被写成标准 preflight 已通过。
+
+随后让已经安装好的 JAX 列出设备：
 
 ```bash
 uv run --no-sync python -c "import jax; print(jax.devices())"
@@ -262,7 +309,8 @@ docker compose -f examples/libero/compose.yml config
 | `nvidia-smi` 列出 A100/H100 | 宿主机能与 NVIDIA 驱动通信 | JAX 和 Docker 一定能使用 GPU |
 | `uv --version` 输出版本 | `uv` 命令可用 | 项目依赖已经安装完整 |
 | `docker compose version` 输出版本 | Compose 插件可用 | Docker daemon、GPU runtime 和镜像构建一定正常 |
-| `git submodule status` 行首没有 `-` | 子模块至少已经初始化 | 子模块内容一定与预期 commit 完全一致；行首 `+` 仍表示 checkout 有偏差 |
+| `docker run --rm --gpus all ... nvidia-smi` 列出 GPU | Docker daemon 能通过 NVIDIA runtime 把 GPU 暴露给这个测试容器 | LIBERO 与模型镜像已经构建或应用服务已经正常启动 |
+| `git submodule status` 所需行首为空格 | 子模块已初始化，并位于父仓库记录的 commit | 子模块内部依赖或后续 LIBERO 运行一定正常 |
 | `uv run --no-sync python --version` 显示 3.11.x | 主环境解释器符合课程约定 | JAX CUDA 后端可用 |
 | `jax.devices()` 至少列出一个 GPU | 当前 `uv` 环境中的 JAX 看到了 GPU | Docker 中的两个服务也一定能看到 GPU |
 | `docker compose ... config` 列出两个服务和 GPU reservation | Compose 文件解析成功，声明符合预期 | 容器已启动或 GPU 分配已实际生效 |
@@ -273,10 +321,10 @@ docker compose -f examples/libero/compose.yml config
 ```text
 宿主机：Ubuntu 22.04，GPU 型号，nvidia-smi 状态
 主环境：Python 3.11.x，uv 版本，jax.devices() 摘要
-容器：Docker Compose 版本，Compose 配置可解析
-子模块：所有行首无 "-"
+容器：Docker Compose 版本，独立 CUDA 容器 GPU smoke test，Compose 配置可解析
+子模块：课程所需行首为空格；任何非空白例外均记录路径、commit、原因和影响
 磁盘：仓库分区可用空间，Docker 存储概况
-渲染计划：默认 EGL；只在有 EGL 证据时回退 GLX
+渲染计划：默认 EGL；完整 GLX override 同时设置 MUJOCO_GL 与 PYOPENGL_PLATFORM
 ```
 
 ### 本文的验证边界
@@ -286,7 +334,7 @@ docker compose -f examples/libero/compose.yml config
 - **静态核对**：从 `README.md`、`pyproject.toml`、LIBERO `Dockerfile` 和 `compose.yml` 确认 Python 3.11/3.8 边界、安装命令、两个 service、host networking、缓存挂载和 EGL 默认值；
 - **当前编写环境实测（2026-07-14）**：`uv --version` 与 `docker compose version` 可运行，仓库分区空间超过 100 GB；但子模块状态行首为 `-`，`nvidia-smi` 无法与驱动通信。因此该环境**没有通过**完整 preflight。
 
-本章编写过程中没有把 `uv run --no-sync python -c "import jax; print(jax.devices())"` 的结果作为已通过证据，也不声称当前环境的 JAX/GPU 检查成功。你的验收必须以自己目标机器的实际输出为准。
+本章编写过程中没有运行或通过 `docker run --rm --gpus all nvidia/cuda:12.2.2-base-ubuntu22.04 nvidia-smi`，也没有把 `uv run --no-sync python -c "import jax; print(jax.devices())"` 的结果作为已通过证据。因此不声称当前环境的 Docker GPU 或 JAX/GPU 检查成功。你的验收必须以自己目标机器的实际输出为准。
 
 ## 常见问题
 
@@ -339,7 +387,9 @@ git submodule status
 git submodule update --init --recursive
 ```
 
-若行首是 `+`，表示当前子模块 checkout 与父仓库记录的 commit 不同；若是 `U`，表示有冲突。不要把这两种情况当成“已经完全正常”，也不要覆盖自己在子模块中的改动。先用 `git -C third_party/libero status --short` 等命令确认是否有本地工作，再决定如何对齐。
+课程所需子模块的标准通过状态是行首为空格。若行首是 `+`，表示当前子模块 checkout 与父仓库记录的 commit 不同；若是 `U`，表示有冲突。不要把这两种情况当成“已经完全正常”，也不要覆盖自己在子模块中的改动。先用 `git -C third_party/libero status --short` 等命令确认是否有本地工作，再决定如何对齐。
+
+如果确实要保留 `+`、`U` 或其他非空白状态，继续前至少记录：子模块路径、前缀、当前 commit、父仓库期望 commit、保留原因和可能影响。这是显式偏离课程基线，而不是标准验收通过。
 
 ### 4. `uv sync` 因网络、GitHub 或 LeRobot Git 依赖失败
 
@@ -368,7 +418,13 @@ docker info
 docker compose -f examples/libero/compose.yml config
 ```
 
-如果已经完成镜像构建，可进一步在模型服务镜像中检查：
+实际 GPU 验收应运行独立 smoke test：
+
+```bash
+docker run --rm --gpus all nvidia/cuda:12.2.2-base-ubuntu22.04 nvidia-smi
+```
+
+该命令首次运行可能拉取镜像。若因为网络、时间或磁盘原因暂缓执行，Docker GPU 访问仍是“未验证”，不能勾选本章完整 preflight。若独立 smoke test 成功，并且已经完成本项目镜像构建，还可进一步检查模型服务镜像：
 
 ```bash
 docker compose -f examples/libero/compose.yml run --rm openpi_server nvidia-smi
@@ -396,7 +452,9 @@ du -sh "${OPENPI_DATA_HOME:-$HOME/.cache/openpi}" "$HOME/.cache/huggingface" ass
 docker compose -f examples/libero/compose.yml logs runtime
 ```
 
-如果默认 EGL 报错，核对 GPU 可见性以及 Compose 中的 `MUJOCO_EGL_DEVICE_ID`、`NVIDIA_DRIVER_CAPABILITIES` 和 `PYOPENGL_PLATFORM`。只有证据指向 EGL 路径时，才用 `MUJOCO_GL=glx` 回退。
+如果默认 EGL 报错，核对 GPU 可见性以及 Compose 中的 `MUJOCO_EGL_DEVICE_ID`、`NVIDIA_DRIVER_CAPABILITIES` 和 `PYOPENGL_PLATFORM`。只有证据指向 EGL 路径时，才回退 GLX。
+
+注意：只在命令前设置 `MUJOCO_GL=glx` 不会覆盖基础 Compose 中硬编码的 `PYOPENGL_PLATFORM=egl`。完整回退应使用前文的双文件 Compose override，让 `runtime` 中 `MUJOCO_GL` 和 `PYOPENGL_PLATFORM` **同时**等于 `glx`，并先用 `docker compose ... config` 核对展开值。
 
 GLX 仍失败时检查：
 
@@ -405,22 +463,22 @@ printf 'DISPLAY=%s\n' "$DISPLAY"
 ls -ld /tmp/.X11-unix
 ```
 
-GLX 需要 X11 socket 与访问权限。按 [LIBERO README](../../examples/libero/README.md) 处理 `xhost`，同时遵守共享服务器的安全策略。若机器本来就是无桌面的计算节点，优先修复 EGL，而不是强行搭建 GLX/X11。
+GLX 需要 X11 socket 与访问权限。按 [LIBERO README](../../examples/libero/README.md) 处理 `xhost`，同时遵守共享服务器的安全策略。授权使用结束后，通常由图形会话所有者在同一个 `DISPLAY`/`XAUTHORITY` 上运行 `xhost -local:docker` 撤销。若机器本来就是无桌面的计算节点，优先修复 EGL，而不是强行搭建 GLX/X11。
 
 ## 本章验收
 
 进入下一章前，逐项提供命令输出或口头解释：
 
 - [ ] 能说出课程支持假设：Ubuntu 22.04、A100/H100、主项目 Python 3.11、Docker Compose、至少 100 GB 可用磁盘；
-- [ ] `git submodule status` 的所需子模块行首没有 `-`；
+- [ ] `git submodule status` 的课程所需子模块行首为空格；若有意保留非空白状态，已记录路径、前缀、实际/期望 commit、原因和影响，并明确标为课程基线例外；
 - [ ] `uv run --no-sync python --version` 输出 Python 3.11.x；
 - [ ] `uv run --no-sync python -c "import jax; print(jax.devices())"` 至少列出一个 GPU；
-- [ ] `docker compose version` 可用，`docker compose -f examples/libero/compose.yml config` 能解析；
+- [ ] `docker compose version` 可用，`docker run --rm --gpus all nvidia/cuda:12.2.2-base-ubuntu22.04 nvidia-smi` 能在容器中列出 GPU，且 `docker compose -f examples/libero/compose.yml config` 能解析；
 - [ ] 能解释宿主机主 `uv` 环境负责数据/统计/训练，推荐评测由 `openpi_server` 和 Python 3.8 `runtime` 两个容器共同完成；
 - [ ] 能明确说出 Policy Server 在推荐 Compose 工作流中运行于 `openpi_server` 容器，而不是永远运行在宿主机；
 - [ ] 能解释为什么不能把 LIBERO 的旧依赖安装进主 `.venv`；
 - [ ] 能指出 `OPENPI_DATA_HOME`、Hugging Face/LeRobot 缓存、Docker 存储、`assets/`、`checkpoints/` 和 `data/libero/videos/` 的不同用途；
-- [ ] 能说明默认渲染是 EGL，`MUJOCO_GL=glx` 只用于有证据的回退，并且 GLX 可能需要 X11 权限。
+- [ ] 能说明默认渲染是 EGL；完整 GLX 回退要同时覆盖 `MUJOCO_GL=glx` 与 `PYOPENGL_PLATFORM=glx`，并在使用后用 `xhost -local:docker` 撤销临时 X11 授权。
 
 若 GPU、子模块或磁盘任一项未通过，不要把“Compose 文件能解析”当成本章完成。第 03 章会实际构建镜像、加载模型并运行 LIBERO，这些前置问题到那时只会更难区分。
 
@@ -453,12 +511,12 @@ GLX 需要 X11 socket 与访问权限。按 [LIBERO README](../../examples/liber
 
 </details>
 
-### 4. EGL 报错后直接永久改用 GLX，为什么不是最稳妥的第一步？
+### 4. EGL 报错后只设置 `MUJOCO_GL=glx`，为什么还不能确认已经完整切换到 GLX？
 
 <details>
 <summary>展开参考答案</summary>
 
-Compose 默认选择 EGL，适合无窗口服务器；EGL 错误也可能源于容器看不到 GPU 或驱动库。GLX 又引入 `DISPLAY`、X11 socket 和权限等新变量。应先保存 EGL 日志并核对 GPU 路径，确认问题确实与 EGL 初始化相关后再临时回退 GLX。
+基础 Compose 除了可展开的 `MUJOCO_GL`，还硬编码了 `PYOPENGL_PLATFORM=egl`。只设置前者会留下互相矛盾的渲染选择器，不能保证 PyOpenGL 已切到 GLX。完整回退需要用 Compose override 同时把两者设为 `glx`，再核对 X11 socket、`DISPLAY` 与权限；用完临时授权后运行 `xhost -local:docker`。
 
 </details>
 
