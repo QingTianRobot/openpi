@@ -29,6 +29,8 @@
 
 本章命令会构建两个镜像、下载模型并启动多轮仿真，时间和磁盘开销都明显大于上一章的静态检查。共享服务器上运行前，先确认 GPU、端口和 Docker 使用约定。
 
+> **安全边界：**当前 Compose 为 `runtime` 设置了 `privileged: true`，并把当前仓库通过 `$PWD:/app` **可写挂载**到 `runtime` 与 `openpi_server` 两个容器。容器会直接执行该 checkout 中的脚本，因此只应在获准使用 Docker/GPU 的主机上运行你信任的仓库内容。共享 Docker host 上还必须先协调唯一的 Compose project name 和 host 端口；执行 `up`、`ps`、`logs` 或 `down` 时始终复用同一个 project name，避免与别人的容器重名、占用同一 host 端口，或对错误的 Compose 项目执行 `down`。
+
 ## 核心概念
 
 ### 推荐的双服务闭环
@@ -110,13 +112,23 @@ LIBERO 环境          runtime / openpi-client              openpi_server / Poli
 
 ### 实践 1：启动最小的预训练评测
 
-设置默认 LIBERO policy，并把每个 task 的 trial 数从默认 50 降到 1：
+在独占的开发主机上，可以设置默认 LIBERO policy，并把每个 task 的 trial 数从默认 50 降到 1：
 
 ```bash
 export SERVER_ARGS="--env LIBERO"
 export CLIENT_ARGS="--args.task-suite-name libero_spatial --args.num-trials-per-task 1"
 docker compose -f examples/libero/compose.yml up --build
 ```
+
+共享 Docker host 上不要直接照搬默认 project name 和 `8000` 端口。先与其他使用者确认一个未占用的端口和唯一项目名，例如把两侧都改为 `18000`，并在所有 Compose 命令中复用 `-p "openpi-tutorial-$USER"`：
+
+```bash
+export SERVER_ARGS="--env LIBERO --port 18000"
+export CLIENT_ARGS="--args.port 18000 --args.task-suite-name libero_spatial --args.num-trials-per-task 1"
+docker compose -p "openpi-tutorial-$USER" -f examples/libero/compose.yml up --build
+```
+
+若同一个 Unix 账号也被多人共享，应再为 project name 加上团队约定的唯一后缀。端口和项目名是两件事：`-p` 隔离 Compose 资源名称，`--port`/`--args.port` 避免 host network 的监听冲突；两侧端口必须相同。
 
 这里的“最小”指减少每个 task 的重复 trial，并不表示只运行一个总 episode。`libero_spatial` 是一个包含多个 task 的 suite；程序仍会遍历 suite 中的多个 task，而 `--args.num-trials-per-task 1` 表示**每个 task 各运行 1 次**。如果只是确认闭环，看到至少一个 episode 已推进并留下证据后，可以按后文方式安全停止，不必等待整个 suite 完成。
 
@@ -127,8 +139,9 @@ docker compose -f examples/libero/compose.yml up --build
 `docker compose up` 会把两个 service 的输出交错显示。不要期待不同版本逐字输出一份完全相同的日志；应识别下面这些语义证据：
 
 - `openpi_server` 一侧先出现 checkpoint/配置加载相关信息，随后出现创建服务、监听端口或接受 WebSocket 连接的迹象；
-- `runtime` 一侧可能先打印等待 `ws://0.0.0.0:8000`，服务就绪后建立连接；
-- 客户端随后打印 task suite、当前任务的自然语言描述、episode 开始/完成进度、`Success: True` 或 `Success: False`，以及累计 episode/成功数；
+- 客户端的 `Task suite: ...` 在构造 WebSocket 客户端**之前**打印，因此它可能先于 `Waiting for server at ...` 出现，不能单独证明已经连接；
+- 轻量客户端没有显式的 `Connected` 日志。可靠的连接证据是等待信息之后客户端继续打印 `Task: ...` 与 `Starting episode...`，或者服务端打印源码中的 `Connection from ... opened`；
+- 建立连接后，客户端继续打印当前任务的自然语言描述、episode 开始/完成进度、`Success: True` 或 `Success: False`，以及累计 episode/成功数；
 - 每个已结束的 episode 会在宿主机 `data/libero/videos/` 下保存一个以 `success` 或 `failure` 结尾的 MP4 回放。
 
 另开终端可以收集容器与文件证据：
@@ -139,14 +152,24 @@ docker compose -f examples/libero/compose.yml logs --tail=200 openpi_server runt
 find data/libero/videos -maxdepth 1 -type f -name 'rollout_*.mp4' -printf '%TY-%Tm-%Td %TH:%TM:%TS %p\n' | sort
 ```
 
+若使用了共享主机示例，前两条命令也必须带相同的 project name：
+
+```bash
+docker compose -p "openpi-tutorial-$USER" -f examples/libero/compose.yml ps
+docker compose -p "openpi-tutorial-$USER" -f examples/libero/compose.yml logs --tail=200 openpi_server runtime
+```
+
 `Success: False` 说明策略没有在该 rollout 内完成任务，不等于 WebSocket、图像预处理或仿真环境部署失败。本章先验收工程闭环，不要求复现上游成功率。
 
 ### 实践 3：完成源码观察任务
 
-先把关键区域带行号打印出来：
+用符号名搜索关键逻辑，并让 `rg` 同时显示上下文。这样即使源码行号变化，观察任务仍然有效：
 
 ```bash
-nl -ba examples/libero/main.py | sed -n '20,155p'
+rg -n -C 4 'agentview_image|robot0_eye_in_hand_image|resize_with_pad' examples/libero/main.py
+rg -n -C 7 '"observation/state"|robot0_eef_pos|_quat2axisangle|robot0_gripper_qpos|"prompt"' examples/libero/main.py
+rg -n -C 6 'replan_steps|action_plan|client\.infer' examples/libero/main.py
+rg -n -C 3 'task_description = task\.language' examples/libero/main.py
 ```
 
 在输出中定位并解释：
@@ -161,19 +184,25 @@ nl -ba examples/libero/main.py | sed -n '20,155p'
 
 ### 实践 4：停止与清理本次运行
 
-在运行 `docker compose up` 的终端按 `Ctrl+C`。等待 Compose 完成停止流程，再检查是否还有运行中的 service：
+在运行 `docker compose up` 的终端按 `Ctrl+C`。等待 Compose 完成停止流程，再使用与 `up` **完全相同的 project name** 检查和清理。
+
+如果使用了默认最小命令：
 
 ```bash
 docker compose -f examples/libero/compose.yml ps
+docker compose -f examples/libero/compose.yml down
+unset SERVER_ARGS CLIENT_ARGS
 ```
 
-如果输出中没有运行中的 service，说明本次进程已停止。想同时查看已停止的容器，可追加 `-a`。若希望移除本 Compose 项目创建的 service 容器，可运行：
+如果使用了共享主机的命名项目与 `18000` 端口示例：
 
 ```bash
-docker compose -f examples/libero/compose.yml down
+docker compose -p "openpi-tutorial-$USER" -f examples/libero/compose.yml ps
+docker compose -p "openpi-tutorial-$USER" -f examples/libero/compose.yml down
+unset SERVER_ARGS CLIENT_ARGS
 ```
 
-`down` 的默认范围是停止并移除这个 Compose 项目的容器及其可移除网络资源。它不会删除已构建镜像、Docker build cache，也不会删除宿主机 bind mount 中的 `data/libero/videos` 或 `${OPENPI_DATA_HOME:-$HOME/.cache/openpi}` checkpoint 缓存。本章没有理由使用 `down --rmi all`、`docker system prune` 或直接删除整个模型缓存。
+不要在命名项目启动后改用不带 `-p` 的 `ps` 或 `down`。如果 `ps` 没有列出运行中的 service，说明本次进程已停止；想同时查看已停止的容器，可追加 `-a`。`down` 的默认范围是停止并移除所选 Compose 项目的容器及其可移除网络资源。它不会删除已构建镜像、Docker build cache，也不会删除宿主机 bind mount 中的 `data/libero/videos` 或 `${OPENPI_DATA_HOME:-$HOME/.cache/openpi}` checkpoint 缓存。最后 `unset` 可避免本章参数意外影响同一 shell 中的后续 Compose 运行。本章没有理由使用 `down --rmi all`、`docker system prune` 或直接删除整个模型缓存。
 
 ## 预期结果
 
@@ -182,7 +211,7 @@ docker compose -f examples/libero/compose.yml down
 | 证据 | 能证明什么 | 不能单独证明什么 |
 | --- | --- | --- |
 | 两个 service 都启动，服务端有创建/监听相关日志 | Compose 和 Policy Server 已进入运行路径 | checkpoint 一定已完成首次推理 |
-| 客户端从等待日志进入已连接状态 | WebSocket 的 host/port 路径可达 | observation 字段和动作 shape 一定正确 |
+| 等待信息后客户端继续打印 `Task:`/`Starting episode...`，或服务端打印 `Connection from ... opened` | WebSocket 的 host/port 路径可达 | observation 字段和动作 shape 一定正确 |
 | 日志出现 task 描述和 episode 开始/累计进度 | LIBERO task suite 与仿真循环已经推进 | 策略一定会成功完成任务 |
 | 日志出现 success/failure，且目录中有新 MP4 | 至少一个 episode 已结束并保存回放 | 整个 suite 已跑完或达到官方成功率 |
 | 后续重规划没有 action 长度断言 | 返回的 action horizon 至少覆盖当前 `replan_steps` | 自定义 checkpoint 与其他配置也一定兼容 |
@@ -194,6 +223,8 @@ docker compose -f examples/libero/compose.yml down
 ## 常见问题
 
 排错顺序统一为“保留现场 → 看 service 状态 → 分开读服务端/客户端日志 → 再修改一个变量”。不要把清空缓存或重装所有依赖当作第一步。
+
+下面的多数排错命令按默认项目写出；如果你用 `-p "openpi-tutorial-$USER"` 启动，就必须给每一条 `docker compose` 排错命令补上同一个 `-p`。不要用默认项目的 `ps`/`logs` 去判断命名项目的状态。
 
 ### 1. 首次 JIT 很慢，还是程序真的挂住了？
 
@@ -225,26 +256,32 @@ ls -ld "${OPENPI_DATA_HOME:-$HOME/.cache/openpi}"
 
 ### 3. `8000` 端口被占用
 
-host network 意味着端口冲突直接发生在宿主机。先找监听者：
+host network 意味着端口冲突直接发生在宿主机。以 `ss` 的监听 socket 为主要证据，再检查可疑容器的状态、host PID 与日志：
 
 ```bash
 ss -ltnp | rg ':8000\b'
-docker ps --format 'table {{.Names}}\t{{.Ports}}' | rg '8000|NAMES'
+docker ps --format 'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}'
+read -r -p "输入候选容器名: " CONTAINER_NAME
+docker inspect --format '{{.Name}} pid={{.State.Pid}} network={{.HostConfig.NetworkMode}}' "$CONTAINER_NAME"
+docker logs --tail=100 "$CONTAINER_NAME"
+unset CONTAINER_NAME
 ```
 
-确认归属后停止你有权停止的旧服务，或者让服务端和客户端一起改用同一个空闲端口，例如：
+使用 `network_mode: host` 时没有 Docker published-port 映射，因此 `docker ps` 的 `{{.Ports}}` 可能为空，即使进程正在监听 host 端口。不要据此判断端口无人使用；先从 `ss` 取得监听 PID，再把 `CONTAINER_NAME` 改成上一步发现的候选容器，用 `docker inspect` 的 host PID 和日志交叉确认归属。若实际使用 `18000` 或其他端口，也要把 `ss` 的筛选值同步替换。
+
+确认归属后停止你有权停止的旧服务，或者让服务端和客户端一起改用同一个空闲端口，并给 Compose 项目一个唯一名称，例如复用前面的共享主机方案：
 
 ```bash
-export SERVER_ARGS="--env LIBERO --port 8001"
-export CLIENT_ARGS="--args.port 8001 --args.task-suite-name libero_spatial --args.num-trials-per-task 1"
-docker compose -f examples/libero/compose.yml up --build
+export SERVER_ARGS="--env LIBERO --port 18000"
+export CLIENT_ARGS="--args.port 18000 --args.task-suite-name libero_spatial --args.num-trials-per-task 1"
+docker compose -p "openpi-tutorial-$USER" -f examples/libero/compose.yml up --build
 ```
 
-只改一侧会造成连接失败。
+只改一侧端口会造成连接失败；后续 `ps`、`logs` 和 `down` 也必须继续使用 `-p "openpi-tutorial-$USER"`。
 
 ### 4. 客户端一直显示等待服务端
 
-`depends_on` 只规定容器启动顺序，不保证模型已经加载完成。轻量客户端遇到 `ConnectionRefusedError` 会每 5 秒重试，因此 checkpoint 加载期间出现等待信息可以是正常现象。先检查服务端是否仍在运行和推进：
+`depends_on` 只规定容器启动顺序，不保证模型已经加载完成。轻量客户端遇到 `ConnectionRefusedError` 会每 5 秒重试，因此 checkpoint 加载期间出现等待信息可以是正常现象。注意 `Task suite: ...` 在连接前就会打印，且客户端没有单独的 `Connected` 日志；只有等待后继续进入 `Task: ...`/`Starting episode...`，或服务端出现 `Connection from ... opened`，才是可靠的连接证据。先检查服务端是否仍在运行和推进：
 
 ```bash
 docker compose -f examples/libero/compose.yml ps -a
@@ -311,12 +348,13 @@ docker compose -f examples/libero/compose.yml logs --tail=300 runtime
 
 - [ ] `docker compose ... ps` 或对应日志证明 `openpi_server` 与 `runtime` 都曾启动；
 - [ ] 服务端日志证明它进入默认 LIBERO policy 的加载与监听路径，且你能说出配置 `pi05_libero` 和 checkpoint `gs://openpi-assets/checkpoints/pi05_libero`；
-- [ ] 客户端从等待状态建立连接，并打印至少一个 task 描述；
+- [ ] 能说明 `Task suite:` 可能先于等待日志，客户端没有显式 `Connected`；等待后出现 `Task:`/`Starting episode...` 或服务端出现 `Connection from ... opened` 才能证明已经连接；
 - [ ] 至少一个 episode 已开始并推进，日志中没有 observation 字段、WebSocket 或 action shape 的立即错误；
 - [ ] 至少能提供一个已结束 episode 的 success/failure 日志，并在 `data/libero/videos` 找到对应回放；成功率高低不是本章验收条件；
 - [ ] 能指出图像旋转、state 拼接、prompt、`replan_steps` 和 action queue 的源码位置并解释作用；
 - [ ] 能说明“每个 task 1 个 trial”不等于“整个 suite 只有 1 个 episode”；
 - [ ] 能用 `Ctrl+C` 停止运行，并说明 `docker compose ... down` 会清理什么、保留什么；
+- [ ] 能说明 `runtime` 的 `privileged: true` 与两个容器的可写 `/app` 挂载意味着什么；共享 host 上能为 `up`、`ps`、`logs`、`down` 复用唯一 project name，并为服务端和客户端设置同一个空闲 host 端口；
 - [ ] 能说明本章环境验收不要求成功率达标，`Success: False` 仍可能对应一个正确运行的工程闭环；
 - [ ] 能说明本章的 `pi05_libero` 预训练 checkpoint 不能与后续 `pi0_libero_tutorial` 混用。
 
