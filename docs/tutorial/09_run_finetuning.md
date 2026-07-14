@@ -134,12 +134,9 @@ gs://openpi-assets/checkpoints/pi0_base/params
 8. 用当前 sharding JIT 包装 `train_step`，进入零基训练循环；
 9. 每步合并模型、计算 loss/grads、更新 trainable state；本章 EMA 关闭；
 10. 每 10 个循环 step 汇总并打印 `loss`、`grad_norm`、`param_norm`，同时写入 disabled W&B；
-11. **先**执行 `batch = next(data_iter)`，为下一轮取 batch；即使当前已经是最终 step 499，也会执行；
-12. **再**判断保存条件并异步提交 `train_state`、`params`、`assets`；循环结束后等待所有保存完成。
+11. 按上文的保存时序推进下一 batch 与异步 checkpoint；循环结束后等待所有保存完成。
 
 这也解释了为什么“还没看到 Step 0”不只可能是 JIT：首个 batch 和基础权重初始化都发生在训练指标之前，应结合最后一条日志、GPU/CPU/磁盘活动判断。
-
-恢复训练也不会跳过数据前置阶段。`create_data_loader()`、`iter(data_loader)` 和首个 `next(data_iter)` 都发生在 `restore_state()` 之前；data config 会从原始 `config.assets_dirs` 读取 normalization statistics。checkpoint 内的 `assets` 是随结果保存的加载资产，当前训练恢复代码不会先把它复制回 `assets/pi0_libero_tutorial/...`。因此 `--resume` 仍要求原始本地数据集和第 08 章生成的原始 stats 路径可读。
 
 ## 动手实践
 
@@ -382,7 +379,6 @@ pgrep -af 'scripts/train.py pi0_libero_tutorial'
 | `pgrep` 无结果 | 进程已经退出，不是“仍在编译” | 回到训练终端看退出码与最后 traceback |
 | 日志出现 `RESOURCE_EXHAUSTED`、`CUDA_ERROR_OUT_OF_MEMORY` 或明确 OOM | 显存不足 | 记录设备、显存峰值、batch/sharding 和其他进程；不要把 fraction 当保证 |
 | 已有 step 日志，但指标出现 `nan`/`inf` | 数值或数据问题 | 停止把后续 checkpoint 当有效成果，保存首个异常 step 与前一窗口指标 |
-| 训练接近结束后在 data loader/worker 报错，且没有 499 save/wait | 最终更新后的额外 `next(data_iter)` 失败 | 保留 traceback；检查数据、worker、I/O，不能声称 final checkpoint 已请求 |
 
 如果希望保留完整终端日志，可以在下一次**新实验名**中显式启用 shell 的 pipeline 失败传播并用 `tee`；不要为了加日志而覆盖当前实验：
 
@@ -435,7 +431,7 @@ fi
 
 ### 实践 8：安全检查实际 checkpoint 目录与 assets
 
-训练期间或正常退出后，先只列出数字 step 目录，不假定 retention 结果。训练仍在进行时，这些只是写盘进度证据；只有进程完成 `wait_until_finished()` 并正常退出后，才继续做组件验收：
+训练期间或正常退出后，按目录 basename 过滤出纯数字 step，再做数字排序，不假定 retention 结果。训练仍在进行时，这些只是写盘进度证据；只有进程完成 `wait_until_finished()` 并正常退出后，才把组件检查当作验收：
 
 ```bash
 set -euo pipefail
@@ -446,30 +442,22 @@ if ! test -d "$CHECKPOINT_ROOT"; then
   exit 1
 fi
 
-find "$CHECKPOINT_ROOT" -mindepth 1 -maxdepth 1 -type d -print | sort -V
-find "$CHECKPOINT_ROOT" -mindepth 1 -maxdepth 1 -type d \
-  -exec stat -c '%y %n' {} \; | sort
-```
-
-找出当前最大的数字目录，并验证 manager 支持的三个组件。不要猜 Orbax 在这些组件内部使用的文件名：
-
-```bash
-set -euo pipefail
-
-CHECKPOINT_ROOT=checkpoints/pi0_libero_tutorial/libero_lora_demo
-if ! test -d "$CHECKPOINT_ROOT"; then
-  echo "CHECKPOINT ROOT DOES NOT EXIST: $CHECKPOINT_ROOT" >&2
-  exit 1
-fi
-
-LATEST_STEP=$(
+NUMERIC_STEPS=$(
   find "$CHECKPOINT_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
-    | awk '/^[0-9]+$/' | sort -n | tail -n 1
+    | awk '/^[0-9]+$/' | sort -n
 )
-if test -z "$LATEST_STEP"; then
+if test -z "$NUMERIC_STEPS"; then
   echo "NO NUMERIC CHECKPOINT STEP FOUND UNDER: $CHECKPOINT_ROOT" >&2
   exit 1
 fi
+
+echo "numeric step directories:"
+printf '%s\n' "$NUMERIC_STEPS"
+while IFS= read -r step; do
+  stat -c '%y %n' "$CHECKPOINT_ROOT/$step"
+done <<< "$NUMERIC_STEPS"
+
+LATEST_STEP=$(printf '%s\n' "$NUMERIC_STEPS" | tail -n 1)
 STEP_DIR="$CHECKPOINT_ROOT/$LATEST_STEP"
 
 echo "latest visible numeric step directory: $STEP_DIR"
@@ -489,6 +477,8 @@ fi
 find "$STEP_DIR" -mindepth 1 -maxdepth 2 -print | sort
 ```
 
+这段命令只把 basename 完全匹配 `^[0-9]+$` 的一级目录放进 `NUMERIC_STEPS`；临时目录、日志文件和其他名称不会参与 `sort -n` 或 latest-step 选择。`set -euo pipefail` 让 `find`、`awk`、`sort`、`stat` 或组件检查中的失败立即传播，而空结果由显式 guard 退出 1。不要猜 Orbax 在三个组件内部使用的文件名。
+
 三个 item 的职责是：
 
 - `train_state`：优化器状态、内部 step，以及恢复训练所需的非推理状态；
@@ -501,7 +491,7 @@ find "$STEP_DIR" -mindepth 1 -maxdepth 2 -print | sort
 
 ### 实践 9：中断后恢复，而不是覆盖
 
-先重新运行实践 2，确认**原始**本地数据和 `assets/pi0_libero_tutorial/openpi-tutorial/libero-small/norm_stats.json` 仍然可读；再运行实践 8，确认存在 manager 已提交的数字 step。恢复命令使用相同 config 和 exp name：
+先重新运行实践 2 与实践 8，再用下面的 fail-fast guard 和相同 config/exp name 恢复：
 
 ```bash
 set -euo pipefail
@@ -550,7 +540,7 @@ checkpoint 内的 `assets` 不会在 resume 前自动还原到 `config.assets_di
 - 配置发现、数据/统计、GPU/batch 和目标 guard 全部退出 0；
 - 训练先打印 data loader/tree 和 train state 信息，随后按 10-step 间隔出现实际的 `loss`、`grad_norm`、`param_norm`；
 - 至少一组日志指标全部有限，没有 `nan`/`inf`；loss 可以波动，不要求单调下降；
-- 在每次 step 后的下一 batch 获取成功时，保存条件依次请求 100、200、300、400、499；完整正常运行会等待异步 manager，且最新有效 step 为 499；
+- 保存条件依次请求 100、200、300、400、499；完整正常运行会等待异步 manager，且最新有效 step 为 499；
 - `checkpoints/pi0_libero_tutorial/libero_lora_demo/` 下至少有一个 manager 已提交的数字 step；
 - 最新有效 step 下存在 `train_state`、`params`、`assets`，且 assets 中包含本配置 asset id 对应的 `norm_stats.json`；
 - `<step>/params` 与匹配的 `pi0_libero_tutorial`/assets 已具备第 10 章进行实际 reload 验证的输入条件；
@@ -564,7 +554,7 @@ checkpoint 内的 `assets` 不会在 resume 前自动还原到 `config.assets_di
 
 ### 2. 本地数据或 normalization statistics 找不到
 
-保留 `HF_HUB_OFFLINE=1`，打印 `HF_LEROBOT_HOME`、精确 repo root、`config.assets_dirs` 和 stats 文件。数据缺失回第 07 章，stats 缺失或非有限回第 08 章。不要联网后让同名远端 repo 掩盖本地路径错误，也不要把别的配置的 stats 复制过来凑路径。
+保留 `HF_HUB_OFFLINE=1`，打印 `HF_LEROBOT_HOME`、精确 repo root、`config.assets_dirs` 和 stats 文件。数据缺失回第 07 章，stats 缺失或非有限回第 08 章。若错误发生在 `--resume`，checkpoint assets 也不能替代这些原始路径，按实践 9 重新预检。不要联网后让同名远端 repo 掩盖本地路径错误，也不要把别的配置的 stats 复制过来凑路径。
 
 ### 3. 离线数据检查失败，但我明明看到目录
 
@@ -604,7 +594,7 @@ checkpoint 内的 `assets` 不会在 resume 前自动还原到 `config.assets_di
 
 ### 12. 接近结束却没有最终 499，或在异步保存期间中断
 
-先看 traceback 所在位置。若失败发生在最终更新后的 `batch = next(data_iter)`，代码尚未进入 499 保存判断，应排查 dataset、worker、I/O 和 transform；若已经出现 checkpoint save/wait 日志后才中断，再按异步提交问题处理。保留目录现场，用 manager 可见的数字 step、组件和时间戳判断最新 committed checkpoint；半写入内容不应手工改名冒充有效 step。`--resume` 只会从 manager 认可的最新状态恢复；如果一个 checkpoint 都未提交，源码会取消实际 resume 并重新初始化。
+先按上文保存时序检查 traceback：停在最终 `next(data_iter)` 就排查 dataset/worker/I/O/transform；已进入 save/wait 后中断才按异步提交处理。保留目录现场，用 manager 可见的数字 step、组件和时间戳判断最新 committed checkpoint；半写入内容不应手工改名冒充有效 step。若一个 checkpoint 都未提交，源码会取消实际 resume 并重新初始化。
 
 ## 本章验收
 
@@ -617,10 +607,9 @@ checkpoint 内的 `assets` 不会在 resume 前自动还原到 `config.assets_di
 - [ ] 已记录磁盘空间和精确 checkpoint 目标，目标存在时 guard 非零退出；
 - [ ] 首次运行使用不存在的新实验目录且不带 `--overwrite`；没有覆盖、删除或混用无关实验；
 - [ ] 实际日志包含至少一组有限的 `loss`、`grad_norm`、`param_norm`；没有用虚构数字或单调下降作为验收；
-- [ ] 至少一个 manager checkpoint 已提交；若完整运行 500 step，最终更新后的额外 batch 获取成功、进程在异步 wait 后正常退出且最新数字 step 为 499；
+- [ ] 至少一个 manager checkpoint 已提交；若完整运行 500 step，进程在异步 wait 后正常退出且最新数字 step 为 499；
 - [ ] 最新有效 step 中存在 `train_state`、`params` 和 `assets/openpi-tutorial/libero-small/norm_stats.json`；
 - [ ] 能说明保存请求是 100、200、300、400、499，但 retention 结果以实际 manager 目录为准；
-- [ ] resume 前原始本地 dataset 与原始 `config.assets_dirs` stats 仍可读；能说明 checkpoint assets 不会自动还原到该路径，且 resume 不恢复精确 data-loader 迭代位置；
 - [ ] `<step>/params`、匹配的配置名与 normalization assets 已准备好供第 10 章实际 reload；
 - [ ] 明确知道本章不要求官方 loss 阈值或 LIBERO success-rate，500 step 只验收工程闭环。
 
@@ -640,7 +629,7 @@ checkpoint 内的 `assets` 不会在 resume 前自动还原到 `config.assets_di
 <details>
 <summary>参考答案（展开查看）</summary>
 
-Python 循环变量从 0 到 499，checkpoint manager 用这个循环变量命名目录；每次 `train_step` 又把状态内部 step 加 1。最终更新后的额外 `next(data_iter)`、499 save 和异步 wait 全部成功时，最终目录是 499，内部训练状态已经完成 500 次更新。恢复它时 `start_step=500`，若总步数仍为 500，循环为空。
+Python 循环变量从 0 到 499，checkpoint manager 用这个循环变量命名目录；每次 `train_step` 又把状态内部 step 加 1。因此完整正常运行的最终目录是 499，内部训练状态已经完成 500 次更新。恢复它时 `start_step=500`，若总步数仍为 500，循环为空。
 
 </details>
 
@@ -667,7 +656,7 @@ resume 的前提是保留已有 checkpoint 并恢复最新状态；overwrite 会
 <details>
 <summary>参考答案（展开查看）</summary>
 
-当前 `save_state()` 只从 data loader 取得 data config，把 normalization statistics 写入 checkpoint `assets`；manager item 只有 `assets`、`train_state`、`params`。resume 在 restore 前就从原始 `config.assets_dirs` 创建 loader 并取首 batch，不会自动把 checkpoint assets 复制回去；`restore_state()` 还显式丢弃 data loader 参数。因此 resume 需要原始 dataset/stats，会恢复模型、优化器和 step，却不会恢复精确 iterator/batch 位置。
+当前 manager item 只有 `assets`、`train_state`、`params`，没有 data-loader iterator item；`restore_state()` 还显式丢弃 data loader 参数。因此 resume 会恢复模型、优化器和 step，却不会恢复精确 iterator/batch 位置。
 
 </details>
 
