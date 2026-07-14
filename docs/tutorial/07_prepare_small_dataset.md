@@ -182,7 +182,13 @@ name = "libero_spatial_no_noops"
 root = Path(os.environ["LIBERO_RLDS_DIR"]).expanduser()
 assert root.is_dir(), root
 
-raw_dataset = tfds.load(name, data_dir=str(root), split="train", shuffle_files=False)
+raw_dataset = tfds.load(
+    name,
+    data_dir=str(root),
+    split="train",
+    shuffle_files=False,
+    download=False,
+)
 episode = next(iter(raw_dataset.take(1)))
 step = next(episode["steps"].as_numpy_iterator())
 
@@ -242,6 +248,39 @@ def main(
     push_to_hub: bool = False,
     max_episodes_per_dataset: int | None = 10,
 ):
+    if max_episodes_per_dataset is not None and max_episodes_per_dataset < 1:
+        raise ValueError("max_episodes_per_dataset must be None or at least 1")
+
+    # Open and minimally validate every source before touching an existing output.
+    # download=False makes a wrong/missing local TFDS dataset fail instead of downloading it.
+    raw_datasets = {}
+    for raw_dataset_name in RAW_DATASET_NAMES:
+        raw_dataset = tfds.load(
+            raw_dataset_name,
+            data_dir=data_dir,
+            split="train",
+            download=False,
+        )
+        first_episode = next(iter(raw_dataset.take(1)), None)
+        if first_episode is None:
+            raise ValueError(f"Raw dataset is empty: {raw_dataset_name}")
+        try:
+            first_step = next(first_episode["steps"].as_numpy_iterator())
+        except StopIteration as exc:
+            raise ValueError(f"First episode has no steps: {raw_dataset_name}") from exc
+        _ = first_step["observation"]["image"]
+        _ = first_step["observation"]["wrist_image"]
+        _ = first_step["observation"]["state"]
+        _ = first_step["action"]
+        instruction = first_step["language_instruction"]
+        if not isinstance(instruction, bytes):
+            raise TypeError(
+                f"Expected bytes language_instruction in {raw_dataset_name}, got {type(instruction).__name__}"
+            )
+        if not instruction.decode().strip():
+            raise ValueError(f"First language instruction is empty: {raw_dataset_name}")
+        raw_datasets[raw_dataset_name] = raw_dataset
+
     output_path = HF_LEROBOT_HOME / REPO_NAME
     if output_path.exists():
         shutil.rmtree(output_path)
@@ -276,8 +315,7 @@ def main(
         image_writer_processes=5,
     )
 
-    for raw_dataset_name in RAW_DATASET_NAMES:
-        raw_dataset = tfds.load(raw_dataset_name, data_dir=data_dir, split="train")
+    for raw_dataset_name, raw_dataset in raw_datasets.items():
         for episode_index, episode in enumerate(raw_dataset):
             if max_episodes_per_dataset is not None and episode_index >= max_episodes_per_dataset:
                 break
@@ -306,7 +344,9 @@ if __name__ == "__main__":
     tyro.cli(main)
 ```
 
-`enumerate()` 给当前 raw dataset 的 episode 编号；索引达到 10 时先 `break`，所以默认最多保存索引 0–9。`None` 表示不设上限，但本章不要用它跑完整数据。原来的 Hub push block 和 `rlds` tag 被保留，只是教学命令不传 `--push-to-hub`，因此不会执行。
+`max_episodes_per_dataset=0` 或负数通常是输入错误，所以代码在任何 I/O 前拒绝它。随后用 `download=False` 打开并最小读取每个本地 source，确认首个 episode/step、所需字段和语言可用；数据集名称拼错、目录缺失或 source 为空时，会在删除输出之前失败。这里仍只是首样本预检，后续质量检查不能省略。
+
+只有全部 source 预检通过，代码才处理 `HF_LEROBOT_HOME / REPO_NAME`。`enumerate()` 给当前 raw dataset 的 episode 编号；索引达到 10 时先 `break`，所以默认最多保存索引 0–9。`None` 表示不设上限，但本章不要用它跑完整数据。原来的 Hub push block 和 `rlds` tag 被保留，只是教学命令不传 `--push-to-hub`，因此不会执行。
 
 先核对 diff，不要立刻运行：
 
@@ -335,15 +375,27 @@ openpi 当前源码直接使用 `LeRobotDatasetMetadata.fps` 和 `.tasks`。不�
 
 ```bash
 uv run --no-sync python - <<'PY'
+import inspect
+from collections.abc import Mapping
 from pathlib import Path
 
 from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME
 from lerobot.common.datasets.lerobot_dataset import LeRobotDatasetMetadata
 
 repo_id = "openpi-tutorial/libero-small"
-meta = LeRobotDatasetMetadata(repo_id)
+root = Path(HF_LEROBOT_HOME) / repo_id
+assert root.is_dir(), f"Local LeRobot dataset does not exist: {root}"
 
-print("local path:", Path(HF_LEROBOT_HOME) / repo_id)
+signature = inspect.signature(LeRobotDatasetMetadata)
+if "root" not in signature.parameters:
+    raise RuntimeError(
+        f"Pinned LeRobotDatasetMetadata signature has no root parameter: {signature}. "
+        "Inspect the pinned API and adapt this local-only check; do not omit root and fall back to the Hub."
+    )
+
+meta = LeRobotDatasetMetadata(repo_id, root=root)
+
+print("local path:", root)
 print("public attributes:")
 print([name for name in dir(meta) if not name.startswith("_")])
 
@@ -359,13 +411,40 @@ if episode_count is not None:
     assert 1 <= episode_count <= 10
 
 features = getattr(meta, "features", None)
-if isinstance(features, dict):
-    for key in ("image", "wrist_image", "state", "actions"):
-        print(f"feature[{key!r}] =", features.get(key, "<missing>"))
+assert isinstance(features, Mapping), f"metadata.features is missing or not a mapping: {features!r}"
+
+expected = {
+    "image": ("image", (256, 256, 3)),
+    "wrist_image": ("image", (256, 256, 3)),
+    "state": ("float32", (8,)),
+    "actions": ("float32", (7,)),
+}
+present_converter_keys = set(features).intersection(expected)
+assert present_converter_keys == set(expected), (
+    f"converter feature keys mismatch: expected {sorted(expected)}, "
+    f"found {sorted(present_converter_keys)}; all metadata keys={sorted(features)}"
+)
+
+
+def field(spec, name):
+    value = spec.get(name) if isinstance(spec, Mapping) else getattr(spec, name, None)
+    assert value is not None, f"Feature spec has no {name!r}: {spec!r}"
+    return value
+
+
+for key, (expected_dtype, expected_shape) in expected.items():
+    spec = features[key]
+    actual_dtype = str(field(spec, "dtype"))
+    actual_shape = tuple(field(spec, "shape"))
+    assert actual_dtype == expected_dtype, (key, actual_dtype, expected_dtype)
+    assert actual_shape == expected_shape, (key, actual_shape, expected_shape)
+    print(f"feature[{key!r}]: dtype={actual_dtype}, shape={actual_shape}")
 PY
 ```
 
-不要把 `"<not exposed...>"` 当错误结论；它表示当前固定 API 没有用这个候选名字公开属性。先根据 `public attributes` 查真实名称，再记录结果。无论属性怎样命名，metadata 中都应能核对 `fps=10`、两路 256×256×3 image feature、8 维 `state`、7 维 `actions`、1–10 个 episode（或你显式选择的更小数量）和非空 tasks。
+本地文档环境没有安装该固定 LeRobot commit，不能靠 import 预先证明构造签名；片段因此先检查 `inspect.signature`，只有确认 `root` 参数存在才构造对象。若断言失败，应根据打印出的固定版本签名调整**显式本地根目录**调用，不能删掉 `root` 参数让库静默查询 Hub。
+
+`total_episodes`、`total_frames` 等计数字段仍用 `getattr` 探测，因为不同 LeRobot 版本可能采用不同公开名称；`fps`、`tasks` 和 `features` 则是本练习的硬契约。features 允许 LeRobot 自己添加 `timestamp`、`frame_index`、`episode_index`、`index`、`task_index` 等系统字段，但转换器负责的四个 key 必须完整存在，并逐一严格匹配 dtype/shape。不要把 `"<not exposed...>"` 当错误结论；它只适用于可选计数字段。
 
 ### 实践 6：检查 frame、数值、任务分布和图像方向
 
@@ -373,17 +452,31 @@ PY
 
 ```bash
 uv run --no-sync python - <<'PY'
+import inspect
 from collections import Counter
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
+from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.common.datasets.lerobot_dataset import LeRobotDatasetMetadata
 
 repo_id = "openpi-tutorial/libero-small"
-dataset = LeRobotDataset(repo_id)
-meta = LeRobotDatasetMetadata(repo_id)
+root = Path(HF_LEROBOT_HOME) / repo_id
+assert root.is_dir(), f"Local LeRobot dataset does not exist: {root}"
+
+for constructor in (LeRobotDatasetMetadata, LeRobotDataset):
+    signature = inspect.signature(constructor)
+    if "root" not in signature.parameters:
+        raise RuntimeError(
+            f"Pinned {constructor.__name__} signature has no root parameter: {signature}. "
+            "Adapt this local-only check to the pinned API; do not fall back to the Hub."
+        )
+
+meta = LeRobotDatasetMetadata(repo_id, root=root)
+dataset = LeRobotDataset(repo_id, root=root)
 
 
 def as_numpy(value):
@@ -399,11 +492,28 @@ def image_to_hwc_uint8(value):
     if image.shape[0] == 3:
         image = np.transpose(image, (1, 2, 0))
     assert image.shape == (256, 256, 3), image.shape
+
+    minimum = float(image.min())
+    maximum = float(image.max())
+    tolerance = 1e-3
     if np.issubdtype(image.dtype, np.floating):
         assert np.isfinite(image).all()
-        if image.min() >= 0.0 and image.max() <= 1.0 + 1e-6:
-            image = image * 255.0
-    return np.clip(image, 0, 255).astype(np.uint8)
+        if minimum >= -tolerance and maximum <= 1.0 + tolerance:
+            image = np.clip(image, 0.0, 1.0) * 255.0
+        elif minimum >= -tolerance and maximum <= 255.0 + tolerance:
+            image = np.clip(image, 0.0, 255.0)
+        else:
+            raise AssertionError(
+                f"unsupported float image range [{minimum}, {maximum}] for dtype={image.dtype}"
+            )
+    elif np.issubdtype(image.dtype, np.integer):
+        if minimum < 0.0 or maximum > 255.0:
+            raise AssertionError(
+                f"unsupported integer image range [{minimum}, {maximum}] for dtype={image.dtype}"
+            )
+    else:
+        raise AssertionError(f"unsupported image dtype={image.dtype}")
+    return image.astype(np.uint8)
 
 
 episode_frames = Counter()
@@ -457,6 +567,8 @@ assert tasks and all(text.strip() for text in tasks.values())
 PY
 ```
 
+图像转换只接受有限浮点的 `[0,1]` 或 `[0,255]` 范围，以及值位于 `[0,255]` 的整数图像；`1e-3` tolerance 只吸收边界附近的浮点误差。其他范围会连同 min/max 明确失败，不会被无条件 `clip` 成一张看似正常的图。
+
 若当前固定 LeRobot 版本返回的系统索引 key 与片段不同，先根据第一行 `row keys` 调整候选 key；不要伪造 episode 边界。检查结果至少回答：
 
 - episode 数与每个 episode 的 frame 数是否合理，`frame_index` 是否在新 episode 从 0 重新开始；
@@ -475,8 +587,8 @@ PY
 
 如果你已经准备了正确的 `libero_spatial_no_noops` TFDS/RLDS 目录、同步了 `rlds` 依赖，并按默认上限运行，则应看到：
 
-1. `HF_LEROBOT_HOME / "openpi-tutorial/libero-small"` 下出现一个本地 LeRobot 数据集；
-2. metadata 的 fps 为 10，features 包含 `image`、`wrist_image`、`state` 和 `actions`；
+1. `HF_LEROBOT_HOME / "openpi-tutorial/libero-small"` 下出现一个本地 LeRobot 数据集，检查代码先断言该目录存在，再显式传入 `root=root`；
+2. metadata 的 fps 为 10，schema 断言确认 features 包含 `image`、`wrist_image`、`state` 和 `actions`；
 3. 两路存储图像均声明为 256×256×3，state 为 8 维，actions 为 7 维；
 4. episode 数为 1–10；若原始 split 至少有 10 个可读 episode，默认教学运行通常得到 10 个；
 5. tasks 非空，frame 中的 task index 能映射回语言指令；
@@ -489,7 +601,7 @@ PY
 
 ### 1. `DatasetNotFoundError`、builder not found 或 split 不存在
 
-先核对名称必须是 `libero_spatial_no_noops`，再打印 `LIBERO_RLDS_DIR` 的绝对路径和 `dataset_info.json` 位置。`data_dir` 应是 `tfds.load(name, data_dir=...)` 能识别的根，而不是随意的父目录、单个 shard 或错误版本子目录。先让实践 1 的只读预检成功，再运行转换。
+先核对名称必须是 `libero_spatial_no_noops`，再打印 `LIBERO_RLDS_DIR` 的绝对路径和 `dataset_info.json` 位置。`data_dir` 应是 `tfds.load(name, data_dir=...)` 能识别的根，而不是随意的父目录、单个 shard 或错误版本子目录。教学版 `main()` 和实践 1 都使用 `download=False`：缺少本地数据时应立即失败，不会替你联网下载。先让只读预检成功，再运行转换。
 
 ### 2. 缺少 `tensorflow_datasets`、TensorFlow 或 `dlimp`
 
@@ -508,7 +620,7 @@ uv run --no-sync python -c 'import tensorflow, tensorflow_datasets, dlimp; print
 
 ### 4. 为什么现有数据突然消失？
 
-原转换器会对 `HF_LEROBOT_HOME / REPO_NAME` 执行 `shutil.rmtree`。如果 `REPO_NAME` 复用了有价值的 id，运行开头就会删除对应本地目录。立即停止后续重跑，检查备份与 shell history；本章要求使用专用 id、运行前打印精确路径并在存在时先备份/重命名。
+仓库原转换器会对 `HF_LEROBOT_HOME / REPO_NAME` 执行 `shutil.rmtree`。本章教学版先打开并最小读取所有 source，再进入这一步，所以名称拼错、目录缺失或空 source 不会先毁掉旧输出；但只要 source 预检通过，同名输出仍会被删除。如果 `REPO_NAME` 复用了有价值的 id，立即停止后续重跑并检查备份；始终使用专用 id、打印精确路径，并在存在时先备份/重命名。
 
 ### 5. image writer 报进程、线程、semaphore 或文件句柄错误
 
@@ -524,20 +636,22 @@ uv run --no-sync python -c 'import tensorflow, tensorflow_datasets, dlimp; print
 
 ### 8. 为什么 Hugging Face 要求登录？
 
-本地转换不需要 Hub 登录。只有显式传入 `--push-to-hub`，程序才会执行上传 block，此时才需要 Hugging Face 身份验证、目标 namespace 权限，并需要重新判断 public/private 设置。本章教学运行不启用该选项；若本地运行却在请求上传认证，先检查完整命令和 `push_to_hub` 默认值。
+本地转换和本地检查都不需要 Hub 登录。检查片段会先断言 `root` 存在、核对构造签名，再显式传入 `root=root`；如果固定 API 不支持这个参数，片段会明确失败，而不是删掉参数后尝试 Hub。只有显式传入 `--push-to-hub`，程序才应执行上传 block，此时才需要 Hugging Face 身份验证、目标 namespace 权限，并需要重新判断 public/private 设置。若本章命令请求网络或认证，先检查 `root`、构造调用和完整命令。
 
 ## 本章验收
 
 进入下一章前，提交或展示以下证据：
 
 - [ ] 在专用 Git 分支中完成转换器练习，并能解释 `REPO_NAME`、单一 raw dataset 和 episode 上限的 diff；
-- [ ] `tfds.load` 只读预检能找到原始 split，并显示两路图像、8 维 state、7 维 action 和可解码语言；
+- [ ] `tfds.load(..., download=False)` 只读预检能找到本地原始 split，并显示两路图像、8 维 state、7 维 action 和可解码语言；
 - [ ] 打印并人工确认精确 `HF_LEROBOT_HOME / REPO_NAME`，没有覆盖有价值的现有 repo id；
-- [ ] 本地 LeRobot repo 存在，metadata 显示 fps=10 和预期 features/dimensions；
+- [ ] 教学版 `main()` 在 `rmtree` 前验证上限并打开/最小读取所有 source，错误 source 不会触发旧输出删除；
+- [ ] metadata/data 检查先断言本地 root 存在并验证两个构造器都支持 `root`，随后以 `root=root` 构造，没有 Hub 回退；
+- [ ] schema 硬断言通过：两路 `image` feature 都是 `image[256,256,3]`，`state` 是 `float32[8]`，`actions` 是 `float32[7]`；
 - [ ] episode 数为 1–10（或与你显式选择的更小数量一致），边界与 frame 数可解释；
 - [ ] tasks 非空，`task_index` 能恢复文本，task 分布与源演示一致；
 - [ ] state/actions 全为有限数，动作范围/离群值已经记录并人工判断；
-- [ ] `image` 与 `wrist_image` 样本都可读取，shape、颜色、方向和相机身份正确；
+- [ ] `image` 与 `wrist_image` 样本都可读取，范围属于 `[0,1]` 浮点、`[0,255]` 浮点或合法整数之一，且 shape、颜色、方向和相机身份正确；
 - [ ] 命令没有 `--push-to-hub`，确认没有意外上传；
 - [ ] 能说明“数据可加载”与“动作/时间/语言语义正确”的差别。
 
