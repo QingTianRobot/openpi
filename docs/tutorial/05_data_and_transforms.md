@@ -13,7 +13,7 @@
 - 解释 normalization statistics、delta/absolute action 语义和 checkpoint/config 为什么必须配套；
 - 面对错 key、错 shape、错统计量或错动作语义时，先在正确的层收集证据。
 
-本章仍用第 03 章的 `pi05_libero` 预训练路径作为推理例子。后续 LoRA 教学会另建 π₀ 配置 `pi0_libero_tutorial`；本章不会预设它必须照搬某个旧配置的 delta 选项。
+本章仍用第 03 章中 `serve_policy.py --env LIBERO` 默认加载的官方 **JAX `pi05_libero`** 预训练路径作为主表和 shape 示例。后续 LoRA 教学会另建 π₀ 配置 `pi0_libero_tutorial`；本章不会预设它必须照搬某个旧配置的 delta 选项。若 checkpoint 被识别为 PyTorch，图像在 `Observation` 内部的布局会不同，后文单独说明。
 
 ## 前置条件
 
@@ -42,21 +42,33 @@ LIBERO action = 末端平移 3 + 末端旋转 3 + 夹爪控制 1       = 7 维
 
 ### LIBERO 字段对照表
 
-下表以当前 [`convert_libero_data_to_lerobot.py`](../../examples/libero/convert_libero_data_to_lerobot.py)、[`LeRobotLiberoDataConfig`](../../src/openpi/training/config.py)、[`LiberoInputs`](../../src/openpi/policies/libero_policy.py) 和 `pi05_libero` 为依据。`H` 表示 action horizon；该预训练配置中 `H=10`、内部 `action_dim=32`、`max_token_len=200`。
+下表以当前 [`convert_libero_data_to_lerobot.py`](../../examples/libero/convert_libero_data_to_lerobot.py)、[`LeRobotLiberoDataConfig`](../../src/openpi/training/config.py)、[`LiberoInputs`](../../src/openpi/policies/libero_policy.py) 和默认 JAX `pi05_libero` 为依据。`H` 表示 action horizon；该预训练配置中 `H=10`、内部 `action_dim=32`、`max_token_len=200`。
 
 | 原始训练 key / 推理 key | repack / adapter 后的 key | 统一 `Observation` / action 字段 | shape（关键阶段） | dtype（关键阶段） | 语义 |
 | --- | --- | --- | --- | --- | --- |
-| 训练：`image`；推理：`observation/image` | 训练 repack 为 `observation/image`；`LiberoInputs` 变为 `image/base_0_rgb` | `Observation.images["base_0_rgb"]` | 训练存储 `(256,256,3)`；推理请求 `(224,224,3)`；最终 batch `(1,224,224,3)` | 训练存储类型 `image`，LeRobot 读取时可能是浮点 CHW；adapter 转 HWC `uint8`；最终 `float32`、范围 `[-1,1]` | 第三人称场景 RGB |
+| 训练：`image`；推理：`observation/image` | 训练 repack 为 `observation/image`；`LiberoInputs` 变为 `image/base_0_rgb` | `Observation.images["base_0_rgb"]` | 训练存储 `(256,256,3)`；推理请求 `(224,224,3)`；JAX 最终 batch `(1,224,224,3)` | 训练存储类型 `image`，LeRobot 读取时通常是浮点 CHW；adapter 转 HWC `uint8`；JAX 最终 `float32`、范围 `[-1,1]` | 第三人称场景 RGB |
 | 训练：`wrist_image`；推理：`observation/wrist_image` | 训练 repack 为 `observation/wrist_image`；adapter 变为 `image/left_wrist_0_rgb` | `Observation.images["left_wrist_0_rgb"]` | 同上 | 同上 | 腕部相机 RGB |
-| 两侧都没有右腕图像 | `LiberoInputs` 创建 `image/right_wrist_0_rgb = zeros_like(base_image)` | `Observation.images["right_wrist_0_rgb"]` | 最终 batch `(1,224,224,3)` | `uint8` 占位图，进入 `Observation` 后为 `float32` | 通用三相机协议的占位，不是第三台真实相机 |
-| 训练：`state`；推理：`observation/state` | 训练 repack 为 `observation/state`；adapter 变为 `state`；model transform padding | `Observation.state` | 原始 `(8,)`；`pi05_libero` padding 后 `(32,)`；最终 batch `(1,32)` | 训练声明 `float32`；推理应提供浮点；最终遵循模型 `float32` 规格 | 末端位置 3 + axis-angle 3 + 两个夹爪关节位置 |
-| 训练：逐 frame `actions`；推理输入：无 | repack 后仍为 `actions`；adapter 原样带入；loader 组成 chunk，model transform padding | 训练的 `Actions`；推理时是模型输出再进入 output transforms | frame `(7,)`；训练 chunk `(H,7)`；内部 `(1,H,32)`；返回 `(H,7)` | 数据集声明 `float32`；模型与返回动作均为浮点 | 每步 3 平移 + 3 旋转 + 1 夹爪控制；按时间排列成 chunk |
+| 两侧都没有右腕图像 | `LiberoInputs` 创建 `image/right_wrist_0_rgb = zeros_like(base_image)` | `Observation.images["right_wrist_0_rgb"]` | JAX 最终 batch `(1,224,224,3)` | `uint8` 占位图，进入 JAX `Observation` 后为 `float32` | 通用三相机协议的占位，不是第三台真实相机 |
+| 训练：`state`；推理：`observation/state` | 训练 repack 为 `observation/state`；adapter 变为 `state`；model transform padding | `Observation.state` | 原始 `(8,)`；`pi05_libero` padding 后 `(32,)`；最终 batch `(1,32)` | 训练与在线请求都应显式提供 `float32`；模型规格也是 `float32` | 末端位置 3 + axis-angle 3 + 两个夹爪关节位置 |
+| 训练：逐 frame `actions`；推理输入：无 | repack 后仍为 `actions`；adapter 原样带入；loader 组成 chunk，model transform padding | 训练的 `Actions`；推理时是 π₀.₅ 连续模型输出再进入 output transforms | frame `(7,)`；训练 chunk `(H,7)`；内部 `(1,H,32)`；返回 `(H,7)` | 训练 action、连续模型输出和环境 action 都应为 `float32` | 每步 3 平移 + 3 旋转 + 1 夹爪控制；按时间排列成 chunk |
 | 训练：frame 写入 `task`，loader 通过 `task_index` 查任务文本；推理：`prompt` | `PromptFromLeRobotTask` 先生成 `prompt`；repack/adapter 保留 `prompt`；model transform 生成 token | `Observation.tokenized_prompt` | 原始是一个字符串；最终 `(1,200)`（`pi05_libero`） | 原始 `str`；最终为整数 token（模型规格 `int32`） | 当前任务的自然语言指令 |
 | 原始两侧均无 `image_mask` | `LiberoInputs` 创建 `image_mask/base_0_rgb`、`left_wrist_0_rgb`、`right_wrist_0_rgb` | `Observation.image_masks[...]` | 每路未 batch 标量；最终各 `(1,)` | `bool` | 标记图像是否有效；π₀/π₀.₅ 的 LIBERO 右腕占位为 `False`，两路真实图像为 `True` |
 | 原始两侧均无 token mask | `TokenizePrompt` 生成 `tokenized_prompt_mask` | `Observation.tokenized_prompt_mask` | 最终 `(1,200)`（`pi05_libero`） | `bool` | `True` 表示真实 token，`False` 表示补齐位置 |
 | 仅 π₀-FAST model transform 生成 | `token_ar_mask`、`token_loss_mask` | `Observation.token_ar_mask`、`token_loss_mask` | 长度由 FAST 的 `max_token_len` 决定 | `int` / `bool` | 控制自回归注意关系和训练 loss 位置；当前 `pi05_libero` 请求中不使用 |
 
 表中 shape 不能脱离阶段阅读。例如，训练文件中的图像是 256×256，在线客户端已提前变成 224×224，而最终 `Observation` 还多了 batch 维。看到其中一个 shape，不能断言其他阶段也完全相同。
+
+### 协议布局与后端内部布局
+
+网络协议和 `LiberoInputs` 使用 HWC 图像；Policy 加 batch 后，进入 `Observation.from_dict()` 前是 BHWC。随后后端分支不同：
+
+| 阶段 | JAX 默认 `pi05_libero` | PyTorch checkpoint 路径 |
+| --- | --- | --- |
+| 请求/adapter 协议 | HWC `uint8` | HWC `uint8` |
+| Policy 加 batch | BHWC `uint8` | BHWC `torch.uint8` |
+| `Observation.from_dict()` 后 | BHWC `float32`，范围 `[-1,1]` | 转为 BCHW `torch.float32`，范围 `[-1,1]` |
+
+因此主表的最终 BHWC shape 只描述本课程默认 JAX 路径，不能外推到 PyTorch 内部。state 和训练 action 也应在协议入口显式构造成 `float32`；Policy 的 `jnp.asarray`/`torch.from_numpy` 是后端转换，不是“任意浮点 dtype 都保证自动变成 float32”的接口承诺。调试时应在发送前检查 dtype，而不是依赖某台机器的 JAX x64 或 PyTorch 行为。
 
 ### 三条 transform 管线的准确顺序
 
@@ -100,15 +112,25 @@ inference request
 同一个函数实际组装的输出顺序是：
 
 ```text
-model output
-  → model_transforms.outputs（模型输入变换的逆向/解码步骤，如 FAST action token 解码）
+model-native output
+  → model_transforms.outputs（模型专用输出变换/解码，如 FAST action token 解码）
   → Unnormalize
   → data_transforms.outputs（机器人/环境动作语义与字段）
   → 可选 repack_transforms.outputs
   → response dict
 ```
 
-对 `pi05_libero` 而言，model output transforms 为空，`extra_delta_transform=False`，所以关键路径是：
+这些输出 transforms 不一定与输入 transforms 一一互逆。例如 resize 没有对应的“反 resize”，而 π₀-FAST 有一个只在输出侧需要的 `ExtractFASTActions`。模型分支应分开理解：
+
+```text
+π₀ / π₀.₅:
+sample_actions → 标准化连续 (B,H,D) → 去 batch → model-specific outputs（通常为空） → Unnormalize
+
+π₀-FAST:
+sample_actions → token-ID 序列 → 去 batch → ExtractFASTActions → 连续 (H,D) → Unnormalize
+```
+
+对 `pi05_libero` 而言，model-specific output transforms 为空，`extra_delta_transform=False`，所以关键路径是：
 
 ```text
 (H,32) model actions → Unnormalize → LiberoOutputs → (H,7) actions
@@ -129,7 +151,7 @@ AbsoluteActions → LiberoOutputs
 | `repack_transforms` | 使用 | 默认不使用数据配置里的 repack | 仅显式传入可选 repack 时使用 | `image → observation/image`、`actions → actions` |
 | `data_transforms` | 使用 | 使用 | 使用 outputs | `LiberoInputs`、可选 `DeltaActions`；输出侧可选 `AbsoluteActions`、`LiberoOutputs` |
 | normalization | state + actions | 通常只有 state | actions 反归一化 | z-score 或 quantile，由配置和统计资产决定 |
-| `model_transforms` | 使用 | 使用 | 使用 outputs | resize、prompt tokenize、padding；FAST 还编码/解码动作 token |
+| `model_transforms` | 使用 | 使用 | 使用模型专用 outputs | resize、prompt tokenize、padding；FAST 还编码/解码动作 token |
 
 判断某个变换属于哪一层，可以问：
 
@@ -172,7 +194,7 @@ normalization 不只是让数值“更好看”。统计量由某个数据集、
 ```text
 训练：环境数值 --Normalize(训练统计)--> 模型学习的数值
 推理：环境 state --同一 Normalize--> 模型输入
-输出：模型 action --同一 Unnormalize--> 环境动作尺度
+输出：连续模型 action --同一 Unnormalize--> 环境动作尺度
 ```
 
 当前配置工厂中，π₀ 默认使用 mean/std，π₀.₅ 与 π₀-FAST 默认使用 quantile statistics。`create_trained_policy()` 优先从 checkpoint 的 `assets/<asset_id>` 加载统计量，正是为了与原训练过程一致。详细背景见[Normalization statistics](../norm_stats.md)。
@@ -225,8 +247,9 @@ LIBERO 原始 action 已经是 delta action。`LeRobotLiberoDataConfig.extra_del
 | [`src/openpi/policies/libero_policy.py`](../../src/openpi/policies/libero_policy.py) | `LiberoInputs` 的字段/图像/mask 适配与 `LiberoOutputs` 的 7 维裁剪 |
 | [`src/openpi/policies/policy_config.py`](../../src/openpi/policies/policy_config.py) | 推理 input/output transforms 与 checkpoint norm stats 的组装顺序 |
 | [`src/openpi/transforms.py`](../../src/openpi/transforms.py) | `RepackTransform`、`Normalize`、`DeltaActions`、tokenize、`PadStatesAndActions` |
-| [`src/openpi/models/model.py`](../../src/openpi/models/model.py) | 最终 `Observation` 字段、图像 `uint8 → [-1,1] float32`、Actions shape |
+| [`src/openpi/models/model.py`](../../src/openpi/models/model.py) | 最终 `Observation` 字段、JAX/PyTorch 图像布局分支、公共模型接口 |
 | [`src/openpi/models/pi0_config.py`](../../src/openpi/models/pi0_config.py) | π₀/π₀.₅ 的 `action_dim`、`action_horizon`、`max_token_len` 和输入规格 |
+| [`src/openpi/models/pi0_fast.py`](../../src/openpi/models/pi0_fast.py) | FAST `sample_actions()` 怎样自回归返回 token-ID 序列 |
 
 更完整的系统背景可读[项目架构深读](../architecture_zh.md)和[模型建立与推理深读](../model_build_and_inference_zh.md)；遇到术语或跨层故障，可查后续补齐的[课程术语表](glossary.md)与[故障排查手册](troubleshooting.md)。
 
@@ -237,29 +260,40 @@ LIBERO 原始 action 已经是 delta action。`LeRobotLiberoDataConfig.extra_del
 从仓库根目录运行：
 
 ```bash
-rg -n -C 8 'def transform_dataset|repack_transforms\.inputs|data_transforms\.inputs|Normalize|model_transforms\.inputs' src/openpi/training/data_loader.py
-rg -n -C 14 'return _policy\.Policy|transforms=\[|output_transforms=\[' src/openpi/policies/policy_config.py
-rg -n -C 10 'class Group|def push|outputs=\(' src/openpi/transforms.py
+rg -n -A 20 '^def transform_dataset' src/openpi/training/data_loader.py
+rg -n -B 2 -A 16 '^    return _policy\.Policy' src/openpi/policies/policy_config.py
+rg -n -A 22 '^class Group' src/openpi/transforms.py
+rg -n -A 14 '^class ExtractFASTActions' src/openpi/transforms.py
 ```
 
-写下三行答案：
+先独立写出三条顺序，再展开参考答案：
+
+<details>
+<summary>参考答案（展开查看）</summary>
 
 ```text
 training input = repack → data → normalize → model
 inference input = data → normalize → model              （标准请求无 dataset repack）
-inference output = inverse model → unnormalize → data output
+inference output = model-specific output/decoding → unnormalize → data output
 ```
 
-然后补充两点：默认 prompt 注入位于推理 data transforms 前；可选外部 repack 只有显式传给 `create_trained_policy()` 时才存在。
+默认 prompt 注入位于推理 data transforms 前；可选外部 repack 只有显式传给 `create_trained_policy()` 时才存在。输出 transforms 是模型专用处理，并不保证与输入 transforms 一一互逆。
+
+</details>
 
 ### 实践 2：手工追踪一个字典
 
 先定位定义：
 
 ```bash
-rg -n -C 16 'class LeRobotLiberoDataConfig|RepackTransform|LiberoInputs|extra_delta_transform|ModelTransformFactory' src/openpi/training/config.py
-rg -n -C 18 'class LiberoInputs|class LiberoOutputs|zeros_like|image_mask|\.\.\., :7' src/openpi/policies/libero_policy.py
-rg -n -C 12 'class ResizeImages|class TokenizePrompt|class PadStatesAndActions|def pad_to_dim' src/openpi/transforms.py
+rg -n -A 8 '^class LeRobotLiberoDataConfig' src/openpi/training/config.py
+rg -n -A 8 '^class ModelTransformFactory' src/openpi/training/config.py
+rg -n -B 2 -A 12 '"observation/image": "image"' src/openpi/training/config.py
+rg -n -B 2 -A 8 'inputs=\[libero_policy\.LiberoInputs' src/openpi/training/config.py
+rg -n -A 42 '^class LiberoInputs' src/openpi/policies/libero_policy.py
+rg -n -B 2 -A 10 '^        if "actions" in data:' src/openpi/policies/libero_policy.py
+rg -n -A 14 '^class LiberoOutputs' src/openpi/policies/libero_policy.py
+rg -n -A 10 '^class PadStatesAndActions' src/openpi/transforms.py
 ```
 
 在纸面或笔记中从这个**推理请求**开始：
@@ -267,23 +301,33 @@ rg -n -C 12 'class ResizeImages|class TokenizePrompt|class PadStatesAndActions|d
 ```text
 observation/image:       uint8 (224,224,3)
 observation/wrist_image: uint8 (224,224,3)
-observation/state:       float (8,)
+observation/state:       float32 (8,)
 prompt:                  str
 ```
 
-每经过一个符号只写“key/shape/dtype 有什么变化”，最后应得到：三路 image、三路 image mask、padding 后 state、tokenized prompt 和 token mask；此时仍没有输入 actions。随后说明模型为什么能输出 `(10,32)`，而 `LiberoOutputs` 为什么返回 `(10,7)`。
+每经过一个符号只写“key/shape/dtype 有什么变化”。完成后再展开参考路径。
+
+<details>
+<summary>参考路径（展开查看）</summary>
+
+`LiberoInputs` 产生三路 image、三路 image mask、8 维 state 和 prompt；normalization 处理 state；model transforms resize/tokenize，并把 state 补到 32 维。Policy 加 batch 后，默认 JAX `Observation` 图像为 BHWC。π₀.₅ 采样连续 `(1,10,32)`，Policy 去 batch、反归一化，`LiberoOutputs` 再裁成 `(10,7)`。推理输入始终没有 `actions`。
+
+</details>
 
 这个练习故意不执行 Python import。实例化完整 data config/tokenizer 可能依赖已同步的 openpi 环境并访问 tokenizer assets；静态源码足以验证顺序，也不会在无意中下载资源。若你自行改成运行式实验，应使用现有环境的 `uv run --no-sync ...`，并把“期望结果”和“本机已验证结果”分开记录。
 
 ### 实践 3：比较动作语义配置
 
 ```bash
-rg -n -C 14 'name="pi0_libero"|name="pi0_libero_low_mem_finetune"|name="pi05_libero"' src/openpi/training/config.py
-rg -n -C 12 'extra_delta_transform|DeltaActions|AbsoluteActions|make_bool_mask\(6, -1\)' src/openpi/training/config.py
-rg -n -C 10 'class DeltaActions|class AbsoluteActions' src/openpi/transforms.py
+rg -n -B 3 -A 9 'name="pi0_libero"' src/openpi/training/config.py
+rg -n -B 3 -A 9 'name="pi0_libero_low_mem_finetune"' src/openpi/training/config.py
+rg -n -B 3 -A 9 'name="pi05_libero"' src/openpi/training/config.py
+rg -n -B 2 -A 9 '^        if self.extra_delta_transform' src/openpi/training/config.py
+rg -n -A 18 '^class DeltaActions' src/openpi/transforms.py
+rg -n -A 18 '^class AbsoluteActions' src/openpi/transforms.py
 ```
 
-请不要只抄 `True/False`。对每个配置记录：raw action 已是什么语义、输入侧是否再做变换、输出侧怎样逆变换、它必须与哪套 checkpoint/统计量保持一致。
+请不要只抄 `True/False`。对每个配置记录：raw action 已是什么语义、输入侧是否再做变换、输出侧怎样恢复对应动作语义、它必须与哪套 checkpoint/统计量保持一致。
 
 ### 实践 4：建立 shape/dtype 调试清单
 
@@ -291,36 +335,29 @@ rg -n -C 10 'class DeltaActions|class AbsoluteActions' src/openpi/transforms.py
 
 - [ ] 训练 key 是 `image/wrist_image/state/actions/task`，在线 key 是 `observation/.../prompt`，没有把二者混传；
 - [ ] 两路图像经过 adapter 后都是 HWC、3 通道、`uint8`，方向与训练预处理一致；
+- [ ] Policy 加 batch 后，默认 JAX 路径保持 BHWC；PyTorch 路径在 `Observation.from_dict()` 中转为 BCHW；
 - [ ] image mask 的 key 与 image key 完全一致，右腕占位 mask 符合当前模型类型；
 - [ ] 原始 LIBERO state 最后一维是 8，顺序为 `3+3+2`；
+- [ ] 在线 state 与训练/环境 action 数组显式为 `float32`，没有依赖后端隐式降精度；
 - [ ] 原始单步 action 最后一维是 7，训练 loader 产生的时间维长度等于 action horizon；
 - [ ] π₀/π₀.₅ model transforms 后 state/action 最后一维等于配置 `action_dim`；
 - [ ] prompt 非空，token 与 token mask 同时存在且长度等于 `max_token_len`；
 - [ ] 没有 NaN/Inf，图像范围、state/action 数值范围与当前阶段相符；
 - [ ] normalization assets 的 `asset_id`、字段维度、量化方式和 checkpoint 配套；
 - [ ] `extra_delta_transform` 与训练/部署使用同一动作语义；
+- [ ] 当前模型原生输出已辨认：π₀/π₀.₅ 是连续 chunk，π₀-FAST 是待 `ExtractFASTActions` 解码的 token ID；
 - [ ] 返回 action shape 是 `(action_horizon, 7)`，再由客户端按 `replan_steps` 截取执行。
 
 ## 预期结果
 
-完成练习后，你应能画出两条互相汇合的数据流：
+完成练习后，重点检查这四个易错点，而不是再抄一遍整条管线：
 
-```text
-训练：image / wrist_image / state / actions / task
-        → repack 为在线 key ┐
-                             ├→ LiberoInputs → normalize → resize/tokenize/pad → Observation + Actions
-推理：observation/.../prompt ┘
-
-模型 actions → inverse model transforms → unnormalize
-             → 可选 AbsoluteActions → LiberoOutputs[:7] → LIBERO action chunk
-```
-
-还应明确说出：
-
-- 原始推理字典不是最终 `Observation`；
-- `LiberoInputs` 负责字段和相机适配，但 action/state 维度 padding 在 model transforms；
-- `pi05_libero` 的内部 action width 是 32，环境输出仍是 7；
-- 正确 shape 只能证明协议外形，不能证明 normalization 或动作语义正确。
+| 易错点 | 可观察的正确结果 |
+| --- | --- |
+| 把训练 key 当在线 key | 追踪记录中先出现 `image → observation/image` 的 training-only repack；在线记录直接从 `observation/image` 开始 |
+| 把协议 HWC 当成所有后端内部布局 | 记录中明确写出 JAX BHWC 与 PyTorch BCHW 的分叉位置是 `Observation.from_dict()` |
+| 把所有 `sample_actions` 输出当连续 `(H,D)` | π₀/π₀.₅ 记录连续 chunk；π₀-FAST 记录 token ID → `ExtractFASTActions` → 连续 chunk |
+| 只看 `(H,7)` 就判定动作正确 | 记录同时包含 norm asset 来源与 `extra_delta_transform`，证明尺度和语义也已核对 |
 
 ### 本文的验证边界
 
@@ -335,8 +372,9 @@ rg -n -C 10 'class DeltaActions|class AbsoluteActions' src/openpi/transforms.py
 先确认错误发生在 `LiberoInputs`，再对比两侧 key：
 
 ```bash
-rg -n -C 8 'observation/image|observation/wrist_image|observation/state' src/openpi/policies/libero_policy.py examples/libero/main.py
-rg -n -C 12 '"observation/image": "image"|"observation/wrist_image": "wrist_image"' src/openpi/training/config.py
+rg -n -B 2 -A 12 '^                        element = \{' examples/libero/main.py
+rg -n -B 2 -A 12 'base_image = _parse_image' src/openpi/policies/libero_policy.py
+rg -n -B 2 -A 10 '"observation/image": "image"' src/openpi/training/config.py
 ```
 
 训练样本若仍叫 `image`，检查 repack 是否进入 data loader；在线请求若发送 `image`，应修客户端协议，而不是给默认推理偷偷套上训练 repack。
@@ -365,20 +403,14 @@ rg -n -C 12 '"observation/image": "image"|"observation/wrist_image": "wrist_imag
 
 ## 本章验收
 
-进入下一章前，逐项完成：
+进入下一章前，提交或展示以下可观察证据：
 
-- [ ] 能区分训练数据集 `image/wrist_image/state/actions/task` 与推理请求 `observation/.../prompt`；
-- [ ] 能指出错 key 应先查 repack 或 `LiberoInputs`/客户端协议；
-- [ ] 能指出错 shape/dtype 应沿 adapter、resize/tokenize/pad 和 `Observation.inputs_spec` 逐层查；
-- [ ] 能指出错 normalization assets 应查 config、asset id、checkpoint 与统计量来源，即使 action shape 正确也不能放过；
-- [ ] 能指出错 action 语义应查 `extra_delta_transform`、`DeltaActions/AbsoluteActions` 和训练/部署一致性；
-- [ ] 能写出训练顺序 `repack → data → normalize → model`；
-- [ ] 能写出标准推理输入顺序 `data → normalize → model`，并说明没有 dataset repack；
-- [ ] 能写出输出顺序 `inverse model → unnormalize → data outputs`；
-- [ ] 能说明 `LiberoInputs` 不做数值维度 padding，`PadStatesAndActions` 才做；
-- [ ] 能解释 8D state、7D action、内部 32D 和 `LiberoOutputs[:7]` 的关系；
-- [ ] 能区分 action horizon、内部 action dimension 和客户端 `replan_steps`；
-- [ ] 能解释 image/token masks 的初学者含义，并指出 π₀-FAST 专用 token masks 不属于当前 `pi05_libero` 请求。
+- [ ] 一份实践 1 的命令输出，并在旁边标出 training input、inference input、model-specific output 三条顺序；
+- [ ] 一张手工追踪表，至少包含“原始请求、`LiberoInputs` 后、normalization 后、model transforms 后、`Observation`、环境输出”六行及各自 key/shape/dtype；
+- [ ] 追踪表中明确记录默认 JAX 图像为 BHWC，并引用源码说明 PyTorch 分支会转为 BCHW；
+- [ ] 一份 `pi0_libero` 与 `pi05_libero` 配置摘录，记录各自 `extra_delta_transform`、raw LIBERO action 语义和配套 checkpoint/statistics 约束；
+- [ ] 一句带源码符号的 FAST 分支说明：`sample_actions` 产生 token ID，`ExtractFASTActions` 在 `Unnormalize` 前解码为连续动作；
+- [ ] 一张四项诊断卡：wrong key → repack/adapter，wrong shape/dtype → adapter/backend/model spec，wrong stats → asset/config/checkpoint，wrong action semantics → delta/absolute transforms。
 
 ## 思考题
 

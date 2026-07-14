@@ -62,13 +62,14 @@ LIBERO / 调用方       WebsocketClientPolicy       WebsocketPolicyServer      
       |                        |                            |                           |-- input transforms
       |                        |                            |                           |-- Observation.from_dict()
       |                        |                            |                           |-- BaseModel.sample_actions()
-      |                        |                            |                           |-- output transforms
+      |                        |                            |                           |-- model-specific output transforms / decoding
+      |                        |                            |                           |-- unnormalize + environment outputs
       |                        |                            |<-- result dict -----------|
       |                        |<-- msgpack response -------|                           |
       |<-- actions + timing ---|                            |                           |
 ```
 
-连接刚建立时还有一次 metadata 握手：服务端先发送 `policy.metadata`，客户端在构造函数中接收并保存。它不属于每次 `infer()` 的 observation/action 往返。
+连接刚建立时还有一次 metadata 握手。标准 [`serve_policy.py`](../../scripts/serve_policy.py) 路径先读取 `policy.metadata`，把它作为 `metadata=` 参数传给 server；server 保存为 `self._metadata`，并在连接建立后发送这份 `_metadata`。客户端在构造函数中接收并保存。它不属于每次 `infer()` 的 observation/action 往返。
 
 ### 八个组件各自负责什么
 
@@ -81,7 +82,9 @@ LIBERO / 调用方       WebsocketClientPolicy       WebsocketPolicyServer      
 | [`Policy.infer()`](../../src/openpi/policies/policy.py) | 编排一次本地推理：输入变换、加 batch/device 转换、模型采样、去 batch、输出变换 | 环境字典 → 机器人/环境可用的结果字典 | 已加载 `BaseModel`、输入/输出 transform、JAX 或 PyTorch runtime |
 | 输入 transforms | 把环境协议逐步变成模型协议：LIBERO 字段适配、归一化、resize、tokenize、pad | 原始 observation → 统一的嵌套字典 | `DataConfig`、normalization assets、[`transforms.py`](../../src/openpi/transforms.py) |
 | [`Observation.from_dict()`](../../src/openpi/models/model.py) | 把嵌套字典收束为模型公共 `Observation`；也把 `uint8` 图像换算到 `[-1, 1]` 浮点范围 | 已变换字典 → `Observation` | 固定字段约定：images、image masks、state、tokens/masks |
-| [`BaseModel.sample_actions()`](../../src/openpi/models/model.py) 与输出 transforms | 具体模型生成标准化 action chunk；随后按配置逆变换、反归一化并还原环境动作字段 | `Observation` → 模型 action → `{"actions": ...}` | π₀/π₀.₅/π₀-FAST 实现、模型输出变换、机器人输出变换 |
+| [`BaseModel.sample_actions()`](../../src/openpi/models/model.py) 与输出 transforms | π₀/π₀.₅ 生成标准化连续 action chunk；π₀-FAST 先生成 token ID，再由模型专用输出 transform 解码；最后反归一化并还原环境动作字段 | `Observation` → 连续 action 或 token ID → `{"actions": ...}` | π₀/π₀.₅/π₀-FAST 实现、模型专用输出解码、机器人输出变换 |
+
+`Policy.infer()` 都把模型返回值暂存在 `outputs["actions"]`，但这个 key 在模型专用输出处理前并不保证已经是连续动作：π₀/π₀.₅ 直接返回标准化的连续 `(B, H, D)` action chunk；π₀-FAST 返回 token-ID 序列，`model_transforms.outputs` 中的 `ExtractFASTActions` 先把它解码为连续 `(H, D)` 动作，之后才进入 `Unnormalize`。输出 transforms 是“模型专用处理/解码”，不一定与输入 transforms 一一互逆。
 
 这张表可以简化成五种责任：
 
@@ -154,9 +157,11 @@ Observation
 从仓库根目录运行：
 
 ```bash
-rg -n -C 5 'def main|policy = create_policy|WebsocketPolicyServer|serve_forever' scripts/serve_policy.py
-rg -n -C 6 'def create_trained_policy|Loading model|load_norm_stats|return _policy\.Policy' src/openpi/policies/policy_config.py
-rg -n -C 5 'def __init__|self\._policy = policy|self\._policy\.infer' src/openpi/serving/websocket_policy_server.py
+rg -n -A 20 '^def main' scripts/serve_policy.py
+rg -n -B 2 -A 12 'logging\.info\("Loading model' src/openpi/policies/policy_config.py
+rg -n -B 2 -A 16 '^    return _policy\.Policy' src/openpi/policies/policy_config.py
+rg -n -A 13 '^    def __init__' src/openpi/serving/websocket_policy_server.py
+rg -n -A 28 '^    async def _handler' src/openpi/serving/websocket_policy_server.py
 ```
 
 在输出中按顺序指出：
@@ -173,10 +178,11 @@ rg -n -C 5 'def __init__|self\._policy = policy|self\._policy\.infer' src/openpi
 继续使用符号搜索，不记录固定行号：
 
 ```bash
-rg -n -C 7 'def infer|self\._packer\.pack|self\._ws\.send|self\._ws\.recv' packages/openpi-client/src/openpi_client/websocket_client_policy.py
-rg -n -C 8 'async def _handler|unpackb|self\._policy\.infer|server_timing|websocket\.send' src/openpi/serving/websocket_policy_server.py
-rg -n -C 12 'def infer|_input_transform|Observation\.from_dict|_sample_actions|_output_transform' src/openpi/policies/policy.py
-rg -n -C 6 'class Observation|def from_dict|class BaseModel|def sample_actions' src/openpi/models/model.py
+rg -n -A 10 '^    def infer' packages/openpi-client/src/openpi_client/websocket_client_policy.py
+rg -n -A 28 '^    async def _handler' src/openpi/serving/websocket_policy_server.py
+rg -n -A 40 '^    def infer\(self, obs: dict, \*, noise:' src/openpi/policies/policy.py
+rg -n -A 20 '^    def from_dict' src/openpi/models/model.py
+rg -n -A 2 '^    def sample_actions' src/openpi/models/model.py src/openpi/models/pi0_fast.py
 ```
 
 把搜索结果整理成一行，不必抄源码：
@@ -192,9 +198,9 @@ rg -n -C 6 'class Observation|def from_dict|class BaseModel|def sample_actions' 
 ### 实践 3：核对配置怎样进入部署
 
 ```bash
-rg -n -C 5 'EnvMode\.LIBERO|pi05_libero|create_default_policy|create_trained_policy' scripts/serve_policy.py
-rg -n -C 12 'name="pi05_libero"|Pi0Config\(|LeRobotLiberoDataConfig|extra_delta_transform' src/openpi/training/config.py
-rg -n -C 10 'transforms=\[|output_transforms=\[' src/openpi/policies/policy_config.py
+rg -n -B 2 -A 5 'EnvMode\.LIBERO: Checkpoint' scripts/serve_policy.py
+rg -n -B 3 -A 10 'name="pi05_libero"' src/openpi/training/config.py
+rg -n -B 2 -A 16 '^    return _policy\.Policy' src/openpi/policies/policy_config.py
 ```
 
 请回答：命名配置在哪里选择模型结构、action horizon 和 LIBERO 数据适配？checkpoint 路径在哪里选择？真正执行 transform 列表的是哪个对象？如果换成自定义 checkpoint，为什么 config、参数和 assets 必须一起核对？
@@ -209,7 +215,7 @@ rg -n -C 10 'transforms=\[|output_transforms=\[' src/openpi/policies/policy_conf
 | server 构造函数保存 `self._policy`，handler 循环调用其 `infer` | 多个请求复用同一 Policy 对象 |
 | 客户端和服务端都调用 `msgpack_numpy` | 传输层负责字典/NumPy 与 bytes 的边界 |
 | `Policy.infer()` 先 `_input_transform`，后 `Observation.from_dict` 和 `_sample_actions` | 预处理、统一模型协议、模型采样有清楚顺序 |
-| `_output_transform` 在去掉 batch 维之后执行 | 后处理面对单个请求的 action chunk |
+| `_output_transform` 在去掉 batch 维之后执行 | 后处理面对单个请求的模型原生输出；π₀-FAST 会先在这里把 token ID 解码为连续 action |
 | `training/config.py` 绑定 model 和 data factory | 配置既影响训练，也影响部署时的 shape、transform 和统计量 |
 
 ### 本文的验证边界
@@ -223,7 +229,7 @@ rg -n -C 10 'transforms=\[|output_transforms=\[' src/openpi/policies/policy_conf
 先搜索依赖注入证据：
 
 ```bash
-rg -n -C 5 'def __init__|policy:.*BasePolicy|self\._policy' src/openpi/serving/websocket_policy_server.py
+rg -n -A 13 '^    def __init__' src/openpi/serving/websocket_policy_server.py
 ```
 
 server 只依赖 `BasePolicy` 接口，不负责理解 π₀ 或 π₀.₅。模型和 transform 已在 `create_trained_policy()` 中组装进 Policy；这种分层让同一个传输层可以服务不同策略。
@@ -234,7 +240,7 @@ server 只依赖 `BasePolicy` 接口，不负责理解 π₀ 或 π₀.₅。模
 
 ### 3. `Policy` 和 `BaseModel` 有什么区别？
 
-`BaseModel` 的公共推理职责是“给定统一 `Observation`，生成标准模型 action”。`Policy` 还负责环境字段适配、normalization、batch/device、输出逆变换和 timing。把一个模型直接当成完整机器人策略，会漏掉这些协议步骤。
+`BaseModel` 的公共推理职责是“给定统一 `Observation`，生成该模型的原生输出”。π₀/π₀.₅ 的原生输出是连续 action chunk；π₀-FAST 的原生输出是 token ID，需要 `ExtractFASTActions` 解码。`Policy` 还负责环境字段适配、normalization、batch/device、模型专用输出处理、机器人输出适配和 timing。把一个模型直接当成完整机器人策略，会漏掉这些协议步骤。
 
 ### 4. 为什么不把模型依赖直接装进客户端？
 
@@ -262,6 +268,7 @@ sed -n '/dependencies = \[/,/^\]/p' pyproject.toml
 - [ ] 能指出负责**预处理**的是 Policy input transforms；
 - [ ] 能指出负责**模型采样**的是 `BaseModel.sample_actions()`；
 - [ ] 能指出负责**后处理**的是 Policy output transforms；
+- [ ] 能区分 π₀/π₀.₅ 的连续 action 输出与 π₀-FAST 的 token ID 输出，并指出 FAST 在反归一化前由 `ExtractFASTActions` 解码；
 - [ ] 能指出负责**配置与组装**的是 `training/config.py` 和 `policy_config.create_trained_policy()`；
 - [ ] 能用源码说明 Policy 在启动期加载、在请求期复用；
 - [ ] 能解释 `Observation.from_dict()` 为什么位于 transform 字典与模型对象之间；
