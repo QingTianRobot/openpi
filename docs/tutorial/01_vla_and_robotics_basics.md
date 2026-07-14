@@ -167,13 +167,15 @@ action chunk shape: (action_horizon, 7)
 
 ### 实践 1：打印 LIBERO 示例 observation 的 shape
 
-在 **仓库根目录**运行：
+完成[第 02 章](02_environment_setup.md)的环境安装与自检后，在 **仓库根目录**运行：
 
 ```bash
-uv run python -c "from openpi.policies.libero_policy import make_libero_example; x=make_libero_example(); print({k: getattr(v, 'shape', type(v).__name__) for k, v in x.items()})"
+uv run --no-sync python -c "from openpi.policies.libero_policy import make_libero_example; x=make_libero_example(); print({k: getattr(v, 'shape', type(v).__name__) for k, v in x.items()})"
 ```
 
 这条命令只创建随机示例并打印字典中每个值的 shape 或类型，不启动模型、不下载 checkpoint，也不运行 LIBERO。随机的是数组内容，shape 是固定的。
+
+这里特意使用 `--no-sync`。普通的 `uv run` 会先检查并可能协调、同步项目依赖；本项目把 `lerobot` 固定到了一个 GitHub commit，因此同步过程可能访问 GitHub。`--no-sync` 可以避免在这个小练习中意外触发依赖解析或网络访问，但前提是第 02 章已经把所需依赖安装到当前环境。
 
 观察时回答三个问题：
 
@@ -181,7 +183,7 @@ uv run python -c "from openpi.policies.libero_policy import make_libero_example;
 2. 哪两个字段都是 `(224, 224, 3)`？
 3. 为什么 `prompt` 显示类型名而不是数组 shape？
 
-如果依赖尚未安装，命令可能在 import 阶段报 `ModuleNotFoundError`。这不改变本章的源码结论；保存报错信息，完成第 02 章环境配置后再运行。不要把“阅读源码确认 shape”写成“命令已经成功运行”。
+如果 `--no-sync` 命令在 import 阶段报 `ModuleNotFoundError` 或其他环境错误，说明第 02 章的安装或当前环境选择还未完成。如果误用了不带 `--no-sync` 的普通 `uv run`，也可能看到依赖同步、`git fetch`、DNS 或 GitHub 访问失败；这属于环境准备或网络问题，不等于示例字段代码出错。保存完整报错，完成环境自检后再运行。不要把“阅读源码确认 shape”写成“命令已经成功运行”。
 
 ### 实践 2：小型 shape 阅读题
 
@@ -266,7 +268,7 @@ state 描述“现在是什么状态”，action 描述“下一步怎样控制�
 
 ### 5. 本章命令失败，是否说明项目代码有问题？
 
-不一定。若是 `ModuleNotFoundError`、Python 版本或环境路径问题，先按第 02 章完成依赖和环境自检。记录完整报错比反复盲目重试更有价值。若命令已经进入函数并打印出字段，则本章 observation shape 实践已经完成。
+不一定。先确认运行的是本章给出的 `uv run --no-sync ...`：若出现 `ModuleNotFoundError`、Python 版本或环境路径问题，按第 02 章完成依赖和环境自检；若使用普通 `uv run` 后出现依赖同步、`git fetch`、DNS 或 GitHub 访问失败，是 `uv` 在协调包含固定 GitHub `lerobot` 在内的项目依赖。两类问题都应保留完整日志，不能只按缺少 Python 模块处理。若命令已经进入函数并打印出字段，则本章 observation shape 实践已经完成。
 
 ## 本章验收
 
