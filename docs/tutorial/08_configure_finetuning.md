@@ -9,10 +9,12 @@
 - 用初学者语言解释 `TrainConfig` 中模型、数据、权重、可训练参数、优化、日志、checkpoint 和 assets 等字段的职责；
 - 在专用练习分支中基于 `pi0_libero_low_mem_finetune` 添加唯一的 `pi0_libero_tutorial` 配置，并检查源码 diff；
 - 说明为什么模型使用的两个 LoRA variant 与生成 `freeze_filter` 的两个 variant 必须完全相同；
+- 解释 LoRA filter 并非全模型 adapter-only，并区分静态规则与实例化 NNX `State` 的具体参数叶子；
+- 检查 global batch 与可见设备数的整除关系，说明默认多卡数据并行复制与显式 FSDP 的区别；
 - 区分本课程的 π₀ LoRA 与第 03 章使用的 `pi05_libero`，并解释为什么二者 checkpoint 不能混用；
 - 不创建模型、不下载权重，只通过配置注册表检查教学配置；
 - 解释 normalization statistics 的计算管线、保存路径和 `--max-frames` 的准确行为；
-- 在写入前检查精确目标，在写入后验证 `state`/`actions` 的 key、shape 和有限性。
+- 在写入前用“目标存在即非零退出”的 guard 防止静默覆盖，在写入后验证 `state`/`actions` 的 key、shape 和有限性。
 
 本章包含一项**由学习者完成的源码修改练习**。本课程文档不会替你修改 [`config.py`](../../src/openpi/training/config.py)；请在自己的专用分支中插入配置、检查 diff，再运行统计命令。
 
@@ -52,12 +54,13 @@ uv run --no-sync python --version
 | `lr_schedule` | 每一步用多大的学习率 | 本章沿用默认 cosine warmup/decay，只做工程链路演示 |
 | `optimizer` | 怎样根据梯度更新可训练参数 | 本章沿用默认 AdamW 和全局梯度裁剪 |
 | `ema_decay` | 是否维护参数的指数移动平均副本 | LoRA 示例设为 `None`，关闭 EMA |
-| `batch_size` | 每个全局训练 step 使用多少条样本 | 设为 8，优先降低教学运行的资源压力 |
+| `batch_size` | 每个全局训练 step 使用多少条样本 | 设为全局 batch 8；必须能被 `jax.device_count()` 整除 |
 | `num_train_steps` | 执行多少个训练 batch/step | 设为 500；这是工程演示，不是性能目标 |
 | `log_interval` | 每隔多少 step 记录一次指标 | 设为 10，短训练中也能看到足够日志 |
 | `save_interval` | 每隔多少 step 保存 checkpoint | 设为 100 |
 | `keep_period` | 哪些周期 checkpoint 不被清理 | 设为 100；本章每次周期保存都落在保留周期上 |
 | `wandb_enabled` | 是否启用 Weights & Biases 远端实验记录 | 设为 `False`，先完成纯本地教学闭环 |
+| `fsdp_devices` | 每个 FSDP 分组使用多少设备 | 本章未显式设置，沿用默认 1；多卡时完整训练状态会复制到各卡，不会自动切分模型 |
 | `assets_base_dir` / `assets_dirs` | normalization statistics 等非权重资产放在哪里 | 默认基目录是 `./assets`，派生目录是 `assets/<config-name>` |
 | `checkpoint_base_dir` / `checkpoint_dir` | 训练权重保存在哪里 | 默认是 `checkpoints/<config-name>/<exp-name>`；`exp_name` 在训练章提供 |
 
@@ -92,7 +95,9 @@ uv run --no-sync python --version
 - 数据改为第 07 章准备的 `openpi-tutorial/libero-small`；
 - batch 改为 8，训练改为 500 step，关闭 EMA 与 W&B。
 
-LoRA 可以把需要更新的参数限制在较小的 adapter 子集，但它不代表训练不需要创建基础模型，也不保证任意 GPU 都不会 OOM。`low_mem` 是相对完整微调而言，实际内存仍受模型、batch、JAX 编译、优化器状态和设备影响。
+本配置不能概括成“全模型只有 adapter 可训练”。对于两个 LoRA variant，当前 `get_freeze_filter()` 冻结 `llm` 路径中**非 LoRA** 的参数；LoRA 让这些 LLM 部分主要通过低秩 adapter 更新，但不属于冻结 LLM 路径的参数仍落在 `trainable_filter` 中。例如视觉、action/state projection 等 LLM 外参数只要存在于实际模型 State 且未被其他规则排除，就仍可训练。
+
+静态阅读只能证明 filter 的组合语义，不能列出本次模型的具体参数叶子。要回答“究竟哪些路径、多少参数可训练”，必须实例化模型并遍历 NNX `State`；本章不会为此创建数十亿参数模型。LoRA 会减少被冻结 LLM 参数的梯度和优化器状态，但基础权重、LLM 外可训练参数、forward 激活和 batch 内存不会消失。因此 `low_mem` 只是相对完整微调的标签，不保证任意单卡或多卡配置都能放下。
 
 ### `model` 与 `freeze_filter` 的 variant 必须逐字一致
 
@@ -107,7 +112,21 @@ pi0_config.Pi0Config(
 )
 ```
 
-第一次决定模型实际有哪些基础参数与 LoRA 参数；第二次决定哪些路径被冻结。如果一边是 LoRA variant，另一边是普通 variant，训练可能错误冻结 LoRA、错误放开基础权重，或让可训练集合与预期不符。不要凭“看起来都是 π₀”省略核对。
+第一次决定模型实际有哪些基础参数与 LoRA 参数；第二次决定哪些路径被冻结。如果一边是 LoRA variant，另一边是普通 variant，训练可能错误冻结 LoRA、错误放开基础权重，或让可训练集合与预期不符。不要凭“看起来都是 π₀”省略核对，也不要从 filter 的静态表达直接声称“只有 adapter 可训练”；具体叶子仍要检查实例化后的 NNX `State`。
+
+### batch 8 是全局 batch，多卡默认不会切分模型
+
+`scripts/train.py` 在创建 mesh 前检查：
+
+```text
+batch_size % jax.device_count() == 0
+```
+
+因此本章的全局 `batch_size=8` 只适用于可见设备数为 1、2、4、8 等能整除 8 的情况；若 JAX 看见 3、6、16 张设备，训练会在开始阶段明确报错。不要把 8 理解为“每张卡 8 条样本”。
+
+本配置没有显式设置 `fsdp_devices`，所以沿用默认值 1。`make_mesh(1)` 会建立 `(device_count, 1)` 的 data-parallel/FSDP mesh；FSDP 轴大小为 1 时，`fsdp_sharding()` 明确把训练状态复制到每张设备。也就是说，多 GPU 默认是数据并行：全局 batch 被分到设备上，但每张卡仍持有完整模型/训练状态，并不会因为卡数增加就自动降低单卡模型内存。
+
+若要启用 FSDP，必须有意识地设置大于 1 的 `fsdp_devices`，同时满足 `jax.device_count() % fsdp_devices == 0`，并检查日志中哪些足够大的矩阵实际被切分、哪些小张量或不兼容 shape 仍然复制。FSDP 会改变性能和内存行为，应作为单独实验验证，不能仅凭 `low_mem` 名称或 GPU 数量推断已经启用。
 
 ### `pi0_libero_tutorial` 与 `pi05_libero` 是两条不可混用的路线
 
@@ -158,6 +177,8 @@ config name
 | [`src/openpi/models/pi0_config.py`](../../src/openpi/models/pi0_config.py) | π₀/π₀.₅ 开关、默认 action horizon、两个 Gemma variant 与 `get_freeze_filter()` |
 | [`src/openpi/training/weight_loaders.py`](../../src/openpi/training/weight_loaders.py) | `CheckpointWeightLoader` 如何载入基础权重并补齐缺失的 LoRA 参数 |
 | [`src/openpi/training/optimizer.py`](../../src/openpi/training/optimizer.py) | 默认 cosine learning-rate schedule、AdamW 与 gradient clipping |
+| [`scripts/train.py`](../../scripts/train.py) | 全局 batch 整除检查、mesh 创建、训练 State sharding 与优化器只接收 trainable filter 的位置 |
+| [`src/openpi/training/sharding.py`](../../src/openpi/training/sharding.py) | data-parallel/FSDP mesh、默认复制规则与哪些大张量可能被切分 |
 | [`scripts/compute_norm_stats.py`](../../scripts/compute_norm_stats.py) | 数据集创建、transform 边界、`max_frames`、`RunningStats` 与输出路径 |
 | [`src/openpi/training/data_loader.py`](../../src/openpi/training/data_loader.py) | LeRobot metadata、action horizon、task→prompt 与完整训练 transform 顺序 |
 | [`src/openpi/shared/normalize.py`](../../src/openpi/shared/normalize.py) | `RunningStats`、JSON 序列化、`save()`/`load()` 和 `norm_stats.json` 格式 |
@@ -245,13 +266,18 @@ git status --short
 
 ```bash
 uv run --no-sync python - <<'PY'
+import jax
+
 from openpi.training import config as _config
 
 config = _config.get_config("pi0_libero_tutorial")
 data_factory = config.data
+device_count = jax.device_count()
 
 assert isinstance(data_factory, _config.LeRobotLiberoDataConfig)
 assert data_factory.base_config is not None
+assert config.batch_size % device_count == 0, (config.batch_size, device_count)
+assert device_count % config.fsdp_devices == 0, (device_count, config.fsdp_devices)
 
 print("name:", config.name)
 print("data factory:", type(data_factory).__name__)
@@ -259,6 +285,9 @@ print("repo id:", data_factory.repo_id)
 print("prompt from task:", data_factory.base_config.prompt_from_task)
 print("extra delta transform:", data_factory.extra_delta_transform)
 print("batch size:", config.batch_size)
+print("visible JAX devices:", device_count)
+print("FSDP devices per group:", config.fsdp_devices)
+print("batch per visible device:", config.batch_size // device_count)
 print("train steps:", config.num_train_steps)
 print("model type:", config.model.model_type.value)
 print("action dim:", config.model.action_dim)
@@ -272,7 +301,9 @@ print("assets dir:", config.assets_dirs)
 PY
 ```
 
-关键输出应包括：`pi0`、action horizon 50、两个 `_lora` variant、repo id、batch 8、steps 500，以及非空的 freeze/trainable filter 表达。`action_dim` 会显示模型内部维度 32；这不否定数据的 8D state/7D action，因为 model transforms 会在归一化之后 padding。不要为了“确认配置”实例化数十亿参数模型。
+关键输出应包括：`pi0`、action horizon 50、两个 `_lora` variant、repo id、全局 batch 8、steps 500、可见设备数、默认 `fsdp_devices=1`，以及 freeze/trainable filter 表达。`action_dim` 会显示模型内部维度 32；这不否定数据的 8D state/7D action，因为 model transforms 会在归一化之后 padding。
+
+此脚本只验证 filter 的规则对象，不会列出实际可训练叶子，也不能据此声称训练是“adapter-only”。它会查询 JAX backend 的可见设备，但不会调用 `config.model.create(...)` 或 `weight_loader.load(...)`。若全局 batch 8 不能被设备数整除，断言应立即失败；先明确调整可见设备或设计新 batch/FSDP 实验，不要等到长时间初始化后才发现。
 
 ### 实践 5：写入前检查精确统计目标
 
@@ -306,21 +337,33 @@ print("target exists:", target.exists())
 print("norm file:", norm_file)
 print("norm file exists:", norm_file.exists())
 
+if norm_file.exists():
+    raise SystemExit(f"REFUSING TO OVERWRITE: {norm_file}")
+
 if target.exists():
     for path in sorted(target.rglob("*")):
         print("existing:", path)
+
+print("preflight passed: norm_stats.json does not exist")
 PY
 ```
 
-若目标中已经有统计文件，先确认它来自哪份数据、是否被 checkpoint 或实验引用。需要保留时，应停止本次写入并备份这个**精确目标目录**，或者为新实验选择新的唯一配置名。不要运行 `rm -rf assets`，也不要清空整个 Hugging Face/openpi cache。专用配置名的价值之一，就是让教学统计进入独立目录。
+这条 preflight 在 `norm_stats.json` 已存在时以非零状态退出；只有看到 `preflight passed` 且命令退出码为 0，才能继续。若文件存在，先确认它来自哪份数据、是否被 checkpoint 或实验引用，再为这个**精确文件或目录**选择明确且不存在的备份/重命名目标，或者为新实验使用新的唯一配置名和 assets 路径。完成后重新运行 preflight，直到它退出 0。不要跳过检查后直接计算，不要运行 `rm -rf assets`，也不要清空整个 Hugging Face/openpi cache。
 
 ### 实践 6：计算最多 2000 frame 的教学统计
 
-确认本地数据和目标后运行：
+确认本地数据后，用同一 shell 中的 guard 再检查一次；目标已存在时下面命令会退出 1，统计脚本不会启动：
 
 ```bash
+NORM_STATS=assets/pi0_libero_tutorial/openpi-tutorial/libero-small/norm_stats.json
+if test -e "$NORM_STATS"; then
+  echo "REFUSING TO OVERWRITE: $NORM_STATS" >&2
+  exit 1
+fi
 uv run --no-sync scripts/compute_norm_stats.py --config-name pi0_libero_tutorial --max-frames 2000
 ```
+
+不要把 `test` 改成只打印 warning 后继续。`compute_norm_stats.py` 的 `normalize.save()` 会直接写目标文件；教程 guard 的目的就是要求你在覆盖发生前做出显式决定。若计算失败后留下了文件，也要先检查/备份现场，再重新运行 guard，而不是无条件重跑。
 
 `--max-frames 2000` 是速度选择，不是统计质量标准。对于 LeRobot 路径，当前脚本的行为是：
 
@@ -333,6 +376,11 @@ uv run --no-sync scripts/compute_norm_stats.py --config-name pi0_libero_tutorial
 如果第 07 章的数据只保存在本地 LeRobot cache，并且你希望错误 repo id 立即失败而不是回退到 Hugging Face Hub，可用本地离线解析：
 
 ```bash
+NORM_STATS=assets/pi0_libero_tutorial/openpi-tutorial/libero-small/norm_stats.json
+if test -e "$NORM_STATS"; then
+  echo "REFUSING TO OVERWRITE: $NORM_STATS" >&2
+  exit 1
+fi
 HF_HUB_OFFLINE=1 uv run --no-sync scripts/compute_norm_stats.py \
   --config-name pi0_libero_tutorial --max-frames 2000
 ```
@@ -395,9 +443,11 @@ shape 正确和全部有限是必要条件，不是充分条件。还应把 mean
 | 数据协议 | 8D state、7D actions | stats 应分别为 `(8,)`、`(7,)`，之后才 pad 到模型 32D |
 | 动作语义 | LIBERO 数据 + `extra_delta_transform=True` | 统计、训练与推理输出逆变换必须一致 |
 | 模型 | π₀，horizon 50 | 不能拿 π₀.₅ 的 horizon/config/checkpoint 替代 |
-| LoRA variants | `gemma_2b_lora` + `gemma_300m_lora` | 模型结构与 freeze filter 必须逐字一致 |
+| LoRA/filter | `gemma_2b_lora` + `gemma_300m_lora`；冻结 LLM 路径中的非 LoRA 参数 | 模型结构与 freeze filter 必须逐字一致；LLM 外参数仍可能训练，具体叶子需检查 NNX State |
 | 初始权重 | `pi0_base/params` | 决定参数树兼容性；不是 `pi05_base` |
+| 设备与 sharding | global batch 8；`fsdp_devices=1` | 8 必须能被可见设备数整除；默认多卡复制完整训练状态，不自动 FSDP |
 | stats 路径 | `assets/pi0_libero_tutorial/openpi-tutorial/libero-small/norm_stats.json` | 训练 loader 和 checkpoint assets 要找到同一份统计 |
+| stats 写入保护 | 目标存在即非零退出 | 覆盖前必须显式备份/重命名或改用唯一配置名，并重新通过 guard |
 | 教学规模 | batch 8、500 step、最多 2000 frame stats | 只验证工程闭环，不是性能承诺 |
 
 若任意一项发生变化，应把它当成一个新实验重新检查，而不是只改最后一条训练命令。
@@ -409,12 +459,14 @@ shape 正确和全部有限是必要条件，不是充分条件。还应把 mean
 如果你已按第 07 章准备正确数据、在练习分支插入配置并完成依赖同步，则应看到：
 
 1. `_config.get_config("pi0_libero_tutorial")` 能成功返回唯一配置；
-2. 发现脚本显示 repo id、batch 8、steps 500、模型类型 `pi0`、horizon 50 和两个 LoRA variant；
-3. 发现阶段没有模型参数分配，也没有基础 checkpoint 下载；
-4. 统计命令读取本地 LeRobot 数据并打印 250 个 batch 左右的进度（当数据长度大于 2000 且 batch 为 8 时）；
-5. 日志打印 `Writing stats to:`，路径以 `assets/pi0_libero_tutorial/openpi-tutorial/libero-small` 结尾；
-6. 目标下出现 `norm_stats.json`，顶层为 `norm_stats`，内部恰有 `state` 和 `actions`；
-7. state 的 mean/std/q01/q99 shape 均为 `(8,)`，actions 对应 shape 均为 `(7,)`，且数值全部有限。
+2. 发现脚本显示 repo id、global batch 8、steps 500、模型类型 `pi0`、horizon 50、两个 LoRA variant、可见设备数和默认 `fsdp_devices=1`；
+3. global batch 8 能被 `jax.device_count()` 整除；默认 `fsdp_devices=1` 表示多卡复制完整训练状态；发现阶段没有模型参数分配，也没有基础 checkpoint 下载；
+4. filter 输出只证明“冻结 LLM 路径中的非 LoRA 参数”这条规则，没有把未实例化的具体叶子误报成 adapter-only；
+5. 首次运行时 preflight 明确输出目标不存在并以 0 退出；若文件已经存在，它以非零退出，统计命令不会启动，直到你显式备份/重命名或更换唯一配置名；
+6. 统计命令读取本地 LeRobot 数据并打印 250 个 batch 左右的进度（当数据长度大于 2000 且 batch 为 8 时）；
+7. 日志打印 `Writing stats to:`，路径以 `assets/pi0_libero_tutorial/openpi-tutorial/libero-small` 结尾；
+8. 目标下出现 `norm_stats.json`，顶层为 `norm_stats`，内部恰有 `state` 和 `actions`；
+9. state 的 mean/std/q01/q99 shape 均为 `(8,)`，actions 对应 shape 均为 `(7,)`，且数值全部有限。
 
 实际耗时、进度速度、均值、标准差和 quantile 取决于本地数据内容、抽样顺序、CPU/磁盘性能及 LeRobot 版本。保存命令、完整日志、配置 diff 和检查输出，作为进入第 09 章的证据。
 
@@ -436,23 +488,31 @@ shape 正确和全部有限是必要条件，不是充分条件。还应把 mean
 
 检查 `len(dataset)`、`batch_size` 和 `max_frames // batch_size`。当前实现只处理完整 batch；`max_frames < batch_size` 会得到 0 batch，数据长度小于一个 batch 也无法产生有效统计。把数值调大前先确认数据集不是空的、episode/frame 转换没有失败。
 
-### 5. 报 `unexpected keyword argument prompt_from_task` 或字段访问错误
+### 5. preflight 报 `REFUSING TO OVERWRITE`
+
+这是预期的安全失败，说明精确目标已有 `norm_stats.json`。先打印文件位置、mtime/大小并查明它属于哪个数据和实验；需要保留时，为精确文件或目录选择明确且不存在的备份/重命名目标，或者为新实验使用唯一配置名。完成后重新运行 preflight。不要删除 guard、把错误改成 warning 或直接重跑统计脚本。
+
+### 6. 报 `unexpected keyword argument prompt_from_task` 或字段访问错误
 
 对照当前 dataclass：factory 是 `LeRobotLiberoDataConfig`，`prompt_from_task` 属于嵌套的 `DataConfig`。正确写法是 `base_config=DataConfig(prompt_from_task=True)`。配置发现脚本直接读取 `data_factory.base_config.prompt_from_task`，不必实例化模型。
 
-### 6. 检查发现 NaN/Inf、shape 不是 `(8,)`/`(7,)`
+### 7. 检查发现 NaN/Inf、shape 不是 `(8,)`/`(7,)`
 
 先回到第 07 章检查具体 frame 的 state/actions，再核对 repack key 和 `LiberoInputs`。保存完整异常、出错 key、真实 shape、episode/frame 索引与原始值。不要通过删除异常维度、`nan_to_num` 或手改统计 JSON 让断言表面通过。
 
-### 7. action 统计范围很奇怪，是否切换 `extra_delta_transform`？
+### 8. action 统计范围很奇怪，是否切换 `extra_delta_transform`？
 
 不要盲切。先对照数据原始动作语义、`DeltaActions` 公式、所选基础 checkpoint 和推理输出逆变换。本章的 `True` 是继承现有旧 π₀ LIBERO 路线的兼容选择；π₀.₅ 现有配置是 `False`。改变它会同时改变 stats 和训练目标，应作为新实验完整重算并验证。
 
-### 8. LoRA 训练却更新了过多参数，或没有 LoRA 参数更新
+### 9. LoRA 为什么不是只有 adapter 在更新？
 
-打印 model 的两个 variant、`freeze_filter` 和 `trainable_filter`，再逐字比较配置块中的两次 `Pi0Config(...)`。不要只比较类名。若 variant 不一致，先修配置并重新开始实验；已有错误 checkpoint 不应继续当作正确 LoRA 结果。
+当前双 LoRA filter 冻结的是 `llm` 路径中的非 LoRA 参数；LLM 路径外未命中的参数仍属于 `Param AND NOT freeze_filter`，所以看到视觉或 action/state projection 等参数可训练并不自动表示 filter 失效。先逐字比较两次 `Pi0Config(...)`；若 variant 不一致，先修配置，已有错误 checkpoint 不应继续当作正确 LoRA 结果。variant 一致后，再对实例化的 NNX `State` 统计实际命中路径和参数量。静态 `repr` 只能解释规则，不能证明具体叶子；若实际路径与规则不符，再保存路径证据排查。
 
-### 9. 写统计时报权限不足或磁盘空间不足
+### 10. `Batch size 8 must be divisible...`，或多卡仍然 OOM
+
+先打印 `jax.device_count()`、global batch 和 `fsdp_devices`。global batch 8 必须能被可见设备总数整除；默认 `fsdp_devices=1` 只做数据并行并把完整训练状态复制到每张卡，所以增加 GPU 不一定降低单卡模型内存。若要试 FSDP，应单独设计一个 `fsdp_devices > 1` 且能整除设备数的实验，检查 sharding 日志和实际显存；不要仅因配置名含 `low_mem` 就假定模型已切分。
+
+### 11. 写统计时报权限不足或磁盘空间不足
 
 打印 `config.assets_dirs`、`df -h .`、精确目标的父目录权限和已有文件大小。只处理本章专用目标，不要用 sudo 改写整个仓库/cache 的所有权，也不要清空未知 assets。若目标已有价值，先停止并备份或换唯一配置名。
 
@@ -464,14 +524,16 @@ shape 正确和全部有限是必要条件，不是充分条件。还应把 mean
 - [ ] 配置名称唯一，现有 `pi0_libero_low_mem_finetune`、`pi05_libero` 和其他配置未被修改；
 - [ ] repo id 精确为 `openpi-tutorial/libero-small`，batch 为 8，steps 为 500；
 - [ ] 模型与 freeze filter 都精确使用 `gemma_2b_lora` + `gemma_300m_lora`；
+- [ ] 能准确说明 filter 冻结 LLM 路径中的非 LoRA 参数，LLM 外参数仍可能训练；没有把静态 filter 表达误称为 adapter-only，具体叶子结论留给实例化 NNX `State` 检查；
 - [ ] 初始 checkpoint 是 `pi0_base/params`，并能说明它不能与 `pi05_base`/`pi05_libero` 混用；
-- [ ] 配置发现脚本能输出 factory 字段、模型类型、horizon、variant 和 freeze/trainable 语义，且没有实例化/下载模型；
-- [ ] 写入前已打印精确目标，没有静默覆盖有价值的旧统计；
+- [ ] 配置发现脚本能输出 factory 字段、模型类型、horizon、variant、freeze/trainable 规则、可见设备数和 `fsdp_devices`，且没有实例化/下载模型；
+- [ ] global batch 8 能被当前 `jax.device_count()` 整除；能说明默认 `fsdp_devices=1` 在多卡上复制完整训练状态，FSDP 需显式设置兼容值并验证日志/显存；
+- [ ] 写入前已打印精确目标；目标存在时 guard 非零退出，已显式备份/重命名或使用唯一配置名并重新通过检查，没有静默覆盖旧统计；
 - [ ] `norm_stats.json` 位于 `assets/pi0_libero_tutorial/openpi-tutorial/libero-small/`；
 - [ ] stats 恰有 `state`/`actions`，所有统计数组均有限，shape 分别为 `(8,)`/`(7,)`；
 - [ ] 能说明统计执行 repack/data transforms，但不执行 Normalize/model transforms；
 - [ ] 能说明 `--max-frames 2000` 是速度折中，500 step 是工程演示，二者都不是性能目标；
-- [ ] 已记录 config、repo、7D/8D、delta、LoRA、stats 路径和后续 Policy Server 名称的一致性清单。
+- [ ] 已记录 config、repo、7D/8D、delta、LoRA/filter、设备/FSDP、stats 路径、写入 guard 和后续 Policy Server 名称的一致性清单。
 
 ## 思考题
 
@@ -489,7 +551,7 @@ shape 正确和全部有限是必要条件，不是充分条件。还应把 mean
 <details>
 <summary>参考答案（展开查看）</summary>
 
-`model=` 的 `Pi0Config` 决定真实参数树中哪些模块具有 LoRA 参数；`get_freeze_filter()` 所属的另一个 `Pi0Config` 根据 variant 生成冻结路径。两者不一致时，实际参数树和冻结规则会描述不同模型，可能错误训练基础权重或冻结 adapter。`trainable_filter` 只是对 freeze filter 取反，不会自动修正这种不一致。
+`model=` 的 `Pi0Config` 决定真实参数树中哪些模块具有 LoRA 参数；`get_freeze_filter()` 所属的另一个 `Pi0Config` 根据 variant 生成冻结路径。两者不一致时，实际参数树和冻结规则会描述不同模型。当前双 LoRA 规则冻结 `llm` 路径中的非 LoRA 参数，但 LLM 外参数仍可能训练，因此不能把它简称为全模型 adapter-only。`trainable_filter` 只是对 freeze filter 取反，不会自动修正 variant 不一致；具体叶子还要在实例化后的 NNX `State` 上检查。
 
 </details>
 
