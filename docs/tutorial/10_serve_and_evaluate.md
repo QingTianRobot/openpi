@@ -106,10 +106,10 @@ Compose 定义了两个 host-network service：
 
 ### 工程闭环与任务成功率是两个验收层级
 
-`libero_spatial` 是包含多个 task 的 suite。`--args.num-trials-per-task 1` 表示**每个 task 各运行一次**，不是整个 suite 只运行一个 episode。客户端会遍历 suite 的多个 task，并把已结束 episode 的 MP4 写到：
+`libero_spatial` 是包含多个 task 的 suite。`--args.num-trials-per-task 1` 表示**每个 task 各运行一次**，不是整个 suite 只运行一个 episode。客户端会遍历 suite 的多个 task；本章再通过 `--args.video-out-path` 把已结束 episode 的 MP4 写到 `data/libero/videos/` 下的本次唯一子目录：
 
 ```text
-data/libero/videos/
+data/libero/videos/pi0-libero-tutorial-step<step>-<RUN_ID>/
 ```
 
 500-step、小数据 LoRA 是工程教学，不是正式性能训练。`Success: False` 可以与以下事实同时成立：checkpoint 成功加载、WebSocket 正常、actions 返回、仿真推进、视频写出。任务 success rate 衡量策略质量；本章验收的是训练到服务再到仿真的接口闭环，不要求达到官方或预训练模型的成功率。
@@ -141,6 +141,7 @@ data/libero/videos/
 
 ```bash
 export CHECKPOINT_STEP=499
+export CHECKPOINT_DIR="checkpoints/pi0_libero_tutorial/libero_lora_demo/$CHECKPOINT_STEP"
 ```
 
 如果没有可信的 499，不要创建同名目录或把其他 step 复制成 499。用下面命令按数字倒序寻找第一个结构完整的候选；它同时要求 `train_state`、`params` 和 checkpoint norm stats 存在：
@@ -182,7 +183,9 @@ if test -z "$SELECTED_STEP"; then
 fi
 
 export CHECKPOINT_STEP="$SELECTED_STEP"
+export CHECKPOINT_DIR="$CHECKPOINT_ROOT/$CHECKPOINT_STEP"
 echo "selected structural candidate: $CHECKPOINT_STEP"
+echo "checkpoint directory: $CHECKPOINT_DIR"
 ```
 
 “结构完整”仍不是训练质量证明。把输出 step 与第 09 章实际日志、save/wait 和时间戳对应；如果目录来自中断现场而 manager 未认可，不要用于服务。
@@ -201,8 +204,15 @@ if test "$(pwd -P)" != "$(cd "$REPO_ROOT" && pwd -P)"; then
 fi
 
 : "${CHECKPOINT_STEP:?Set CHECKPOINT_STEP to 499 or a verified numeric step first}"
+: "${CHECKPOINT_DIR:?Select a checkpoint in practice 1 first}"
 if ! [[ "$CHECKPOINT_STEP" =~ ^[0-9]+$ ]]; then
   echo "CHECKPOINT_STEP MUST BE NUMERIC: $CHECKPOINT_STEP" >&2
+  exit 1
+fi
+
+EXPECTED_CHECKPOINT_DIR="checkpoints/pi0_libero_tutorial/libero_lora_demo/$CHECKPOINT_STEP"
+if test "$CHECKPOINT_DIR" != "$EXPECTED_CHECKPOINT_DIR"; then
+  echo "CHECKPOINT_DIR DOES NOT MATCH CHECKPOINT_STEP: $CHECKPOINT_DIR" >&2
   exit 1
 fi
 
@@ -212,7 +222,6 @@ if test "${CONFIG_COUNT:-0}" -ne 1; then
   exit 1
 fi
 
-export CHECKPOINT_DIR="checkpoints/pi0_libero_tutorial/libero_lora_demo/$CHECKPOINT_STEP"
 for component in train_state params assets; do
   if ! test -e "$CHECKPOINT_DIR/$component"; then
     echo "MISSING CHECKPOINT COMPONENT: $CHECKPOINT_DIR/$component" >&2
@@ -283,39 +292,48 @@ PY
 ```bash
 set -euo pipefail
 
-if ss -ltn | rg -q ':8000\b'; then
+SS_LISTEN=$(ss -ltn)
+if rg ':8000\b' <<< "$SS_LISTEN" >/dev/null; then
   echo "HOST PORT 8000 IS ALREADY IN USE" >&2
   exit 1
 fi
 
-export SERVER_ARGS="--env LIBERO policy:checkpoint --policy.config pi0_libero_tutorial --policy.dir ./checkpoints/pi0_libero_tutorial/libero_lora_demo/499"
-export CLIENT_ARGS="--args.task-suite-name libero_spatial --args.num-trials-per-task 1"
-
+: "${CHECKPOINT_DIR:?Select and verify a checkpoint first}"
+SERVER_ARGS="--env LIBERO policy:checkpoint --policy.config pi0_libero_tutorial --policy.dir ./$CHECKPOINT_DIR" \
+CLIENT_ARGS="--args.task-suite-name libero_spatial --args.num-trials-per-task 1 --args.video-out-path data/libero/videos/compose-config-preview-$CHECKPOINT_STEP" \
 docker compose -f examples/libero/compose.yml config \
   | rg -n 'privileged: true|network_mode: host|SERVER_ARGS|CLIENT_ARGS|/app|OPENPI_DATA_HOME|openpi_assets'
 ```
 
-如果你选择的不是 499，把 `SERVER_ARGS` 中的末尾 step 改为已验证的 `$CHECKPOINT_STEP`：
-
-```bash
-export SERVER_ARGS="--env LIBERO policy:checkpoint --policy.config pi0_libero_tutorial --policy.dir ./checkpoints/pi0_libero_tutorial/libero_lora_demo/$CHECKPOINT_STEP"
-```
+这里先把完整 `ss -ltn` 输出保存到变量，再让 `rg` 读取完整文本；没有 `rg -q` 提前关闭 pipe，因此 `set -o pipefail` 不会把上游 SIGPIPE 混成“端口空闲”。Compose 预览中的 policy 路径来自已验证的 `$CHECKPOINT_DIR`。
 
 检查展开结果中的 `/app` host source 是否就是当前仓库，确认 `runtime` 仍是 privileged，两个 service 使用 host network，且服务端 cache 挂载符合预期。`docker compose config` 不构建镜像或加载模型，只验证静态合成结果。
 
-### 实践 4：启动默认教学闭环
+### 实践 4：启动默认教学闭环并隔离视频证据
 
-若完整运行已验证 499，默认教学命令是：
+为每次实际运行生成唯一 `RUN_ID` 和全新视频目录。若目录已经存在，guard 会拒绝继续，避免把旧 MP4 当作本次证据：
 
 ```bash
-export SERVER_ARGS="--env LIBERO policy:checkpoint --policy.config pi0_libero_tutorial --policy.dir ./checkpoints/pi0_libero_tutorial/libero_lora_demo/499"
-export CLIENT_ARGS="--args.task-suite-name libero_spatial --args.num-trials-per-task 1"
+set -euo pipefail
+
+: "${CHECKPOINT_STEP:?Select and verify a checkpoint first}"
+: "${CHECKPOINT_DIR:?Select and verify a checkpoint first}"
+export RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+export VIDEO_OUT_PATH="data/libero/videos/pi0-libero-tutorial-step${CHECKPOINT_STEP}-$RUN_ID"
+if test -e "$VIDEO_OUT_PATH"; then
+  echo "VIDEO EVIDENCE PATH ALREADY EXISTS: $VIDEO_OUT_PATH" >&2
+  exit 1
+fi
+printf 'RUN_ID=%s\nVIDEO_OUT_PATH=%s\n' "$RUN_ID" "$VIDEO_OUT_PATH"
+
+export SERVER_ARGS="--env LIBERO policy:checkpoint --policy.config pi0_libero_tutorial --policy.dir ./$CHECKPOINT_DIR"
+export CLIENT_ARGS="--args.task-suite-name libero_spatial --args.num-trials-per-task 1 --args.video-out-path $VIDEO_OUT_PATH"
 docker compose -f examples/libero/compose.yml up --build
 ```
 
 Tyro 会把 `policy:checkpoint` 解析为显式 checkpoint policy，并把 `--policy.config`、`--policy.dir` 填入对应字段。此时 `create_policy()` 直接走 `Checkpoint` 分支，不会读取 `args.env` 的默认 checkpoint 映射；所以 `--env LIBERO` 对显式 policy 实际未参与选择，保留它是无害的环境意图标记。更精简的等价服务参数可以省略 `--env LIBERO`，但本课程保留它以与 LIBERO Compose 命令一致。
 
-如果选择了其他 step，使用实践 3 中含 `$CHECKPOINT_STEP` 的 `SERVER_ARGS` 后再执行同一 `docker compose ... up --build`。
+`CHECKPOINT_DIR` 在实践 1 随所选 step 一起建立，因此 499 与其他数字 step 使用同一命令，不再手工改字符串。`VIDEO_OUT_PATH` 是相对于容器 `/app` 的路径，也就是宿主机当前 checkout 中本次独有的目录。
 
 第一次运行仍可能经历镜像拉取、apt/uv 依赖安装、tokenizer GCS 下载、模型加载和首次 JIT。`./checkpoints/...` 是 `/app` 中的本地 bind-mount 路径，不应被重新当作远端 checkpoint 下载；日志若显示本地路径不存在，应先检查 `$PWD:/app` 和 step 选择。
 
@@ -326,20 +344,31 @@ Tyro 会把 `policy:checkpoint` 解析为显式 checkpoint policy，并把 `--po
 ```bash
 set -euo pipefail
 
-if ss -ltn | rg -q ':18000\b'; then
+SS_LISTEN=$(ss -ltn)
+if rg ':18000\b' <<< "$SS_LISTEN" >/dev/null; then
   echo "HOST PORT 18000 IS ALREADY IN USE" >&2
   exit 1
 fi
 
-export SERVER_ARGS="--env LIBERO --port 18000 policy:checkpoint --policy.config pi0_libero_tutorial --policy.dir ./checkpoints/pi0_libero_tutorial/libero_lora_demo/499"
-export CLIENT_ARGS="--args.port 18000 --args.task-suite-name libero_spatial --args.num-trials-per-task 1"
+: "${CHECKPOINT_STEP:?Select and verify a checkpoint first}"
+: "${CHECKPOINT_DIR:?Select and verify a checkpoint first}"
+export RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-shared"
+export VIDEO_OUT_PATH="data/libero/videos/pi0-libero-tutorial-step${CHECKPOINT_STEP}-$RUN_ID"
+if test -e "$VIDEO_OUT_PATH"; then
+  echo "VIDEO EVIDENCE PATH ALREADY EXISTS: $VIDEO_OUT_PATH" >&2
+  exit 1
+fi
+printf 'RUN_ID=%s\nVIDEO_OUT_PATH=%s\n' "$RUN_ID" "$VIDEO_OUT_PATH"
+
+export SERVER_ARGS="--env LIBERO --port 18000 policy:checkpoint --policy.config pi0_libero_tutorial --policy.dir ./$CHECKPOINT_DIR"
+export CLIENT_ARGS="--args.port 18000 --args.task-suite-name libero_spatial --args.num-trials-per-task 1 --args.video-out-path $VIDEO_OUT_PATH"
 
 docker compose -p "openpi-tutorial-$USER-lora" -f examples/libero/compose.yml config \
   | rg -n '18000|SERVER_ARGS|CLIENT_ARGS|network_mode: host'
 docker compose -p "openpi-tutorial-$USER-lora" -f examples/libero/compose.yml up --build
 ```
 
-如果同一 Unix 账号由多人共享，请把 `openpi-tutorial-$USER-lora` 换成团队确认的唯一后缀。若 step 不是 499，也必须同步替换服务参数。`-p` 只隔离 Compose 资源名称；host network 的端口冲突必须由服务端 `--port 18000` 与客户端 `--args.port 18000` 一起解决。
+如果同一 Unix 账号由多人共享，请把 `openpi-tutorial-$USER-lora` 换成团队确认的唯一后缀。`-p` 只隔离 Compose 资源名称；host network 的端口冲突必须由服务端 `--port 18000` 与客户端 `--args.port 18000` 一起解决。
 
 另一个终端查看状态和日志时，也要使用同一 project：
 
@@ -352,23 +381,43 @@ docker compose -p "openpi-tutorial-$USER-lora" -f examples/libero/compose.yml lo
 
 ### 实践 6：收集连接、action 与 episode 证据
 
-默认项目可以在另一个终端运行：
+默认项目可以在另一个终端先查看状态和日志：
 
 ```bash
 docker compose -f examples/libero/compose.yml ps -a
 docker compose -f examples/libero/compose.yml logs --tail=400 openpi_server runtime
-find data/libero/videos -maxdepth 1 -type f -name 'rollout_*.mp4' \
-  -printf '%TY-%Tm-%Td %TH:%TM:%TS %p\n' | sort
 ```
 
-共享项目给前两条命令加同一个 `-p "openpi-tutorial-$USER-lora"`。重点寻找以下证据：
+共享项目给这两条命令加同一个 `-p "openpi-tutorial-$USER-lora"`。重点寻找以下证据：
 
 1. 服务端完成 `Loading model...`，没有参数 tree/shape 或 norm stats 错误，并进入创建 server 的路径；
 2. 客户端可能先打印 `Task suite: libero_spatial` 与 `Waiting for server...`；轻量客户端**没有**显式 `Connected` 日志；
 3. 可靠的连接证据是服务端 `Connection from ... opened`，或客户端等待后继续到 `Task: ...` 与 `Starting episode...`；
 4. `Starting episode...` 之后前 10 个 timestep 是 dummy action 等待。要证明真实 policy actions 返回，应继续确认服务端没有错误帧、客户端没有 `Caught exception`/action horizon 断言，并观察 episode 持续推进或结束；
 5. 当前 config 的静态 horizon 是 50，客户端断言实际 `len(action_chunk) >= 5`；随后 `LiberoOutputs` 只返回前 7 个 action 维度供环境执行；
-6. 已结束 episode 会记录 `Success: True/False`、累计进度，并在 `data/libero/videos/` 留下 success/failure MP4。
+6. 已结束 episode 会记录 `Success: True/False`、累计进度，并在本次唯一 `$VIDEO_OUT_PATH` 留下 success/failure MP4。
+
+在监控终端复制启动终端打印或 `export` 的**精确** `VIDEO_OUT_PATH`；至少一个 episode 结束后，用 fail-fast 检查拒绝共享目录中的旧视频：
+
+```bash
+set -euo pipefail
+
+: "${VIDEO_OUT_PATH:?Export the exact VIDEO_OUT_PATH from the launch terminal}"
+if ! test -d "$VIDEO_OUT_PATH"; then
+  echo "THIS RUN HAS NOT CREATED ITS VIDEO DIRECTORY: $VIDEO_OUT_PATH" >&2
+  exit 1
+fi
+
+NEW_VIDEOS=$(
+  find "$VIDEO_OUT_PATH" -maxdepth 1 -type f -name 'rollout_*.mp4' \
+    -printf '%TY-%Tm-%Td %TH:%TM:%TS %p\n' | sort
+)
+if test -z "$NEW_VIDEOS"; then
+  echo "NO MP4 EVIDENCE FOR THIS RUN: $VIDEO_OUT_PATH" >&2
+  exit 1
+fi
+printf '%s\n' "$NEW_VIDEOS"
+```
 
 用源码再次核对 action 契约：
 
@@ -388,7 +437,7 @@ rg -n 'return \{"actions".*:7' src/openpi/policies/libero_policy.py
 task suite:            libero_spatial
 trials per task:       1
 replan steps:          5
-video output:          data/libero/videos
+video output:          $VIDEO_OUT_PATH（每次运行唯一）
 ```
 
 主循环仍遍历 `task_suite.n_tasks`。因此即使每个 task 只有一个 trial，完整 suite 也会运行多个 episode，可能耗时很长。只做早期 smoke check 时，可以在真实 action 请求成功且 episode 已推进后安全停止；要完成本章验收，至少让一个 episode 走到 success/failure 记录与 MP4 写出，但不必等待整个 suite。
@@ -402,7 +451,7 @@ video output:          data/libero/videos
 ```bash
 docker compose -f examples/libero/compose.yml ps -a
 docker compose -f examples/libero/compose.yml down
-unset SERVER_ARGS CLIENT_ARGS CHECKPOINT_STEP CHECKPOINT_DIR
+unset SERVER_ARGS CLIENT_ARGS CHECKPOINT_STEP CHECKPOINT_DIR RUN_ID VIDEO_OUT_PATH
 ```
 
 共享项目必须继续使用相同 project name：
@@ -410,7 +459,7 @@ unset SERVER_ARGS CLIENT_ARGS CHECKPOINT_STEP CHECKPOINT_DIR
 ```bash
 docker compose -p "openpi-tutorial-$USER-lora" -f examples/libero/compose.yml ps -a
 docker compose -p "openpi-tutorial-$USER-lora" -f examples/libero/compose.yml down
-unset SERVER_ARGS CLIENT_ARGS CHECKPOINT_STEP CHECKPOINT_DIR
+unset SERVER_ARGS CLIENT_ARGS CHECKPOINT_STEP CHECKPOINT_DIR RUN_ID VIDEO_OUT_PATH
 ```
 
 `down` 不会删除宿主机 bind mount 中的 checkpoint、课程源码、视频或 `${OPENPI_DATA_HOME}` cache。不要使用 `down --rmi all`、`docker system prune` 或删除整个 cache 来完成本章清理。
@@ -420,8 +469,24 @@ unset SERVER_ARGS CLIENT_ARGS CHECKPOINT_STEP CHECKPOINT_DIR
 只有在教学项目已经停止、你明确需要工程参考且资源允许时，才单独运行预训练配置。使用不同 config/checkpoint、project、端口和视频目录，避免混合证据：
 
 ```bash
+set -euo pipefail
+
+SS_LISTEN=$(ss -ltn)
+if rg ':18001\b' <<< "$SS_LISTEN" >/dev/null; then
+  echo "HOST PORT 18001 IS ALREADY IN USE" >&2
+  exit 1
+fi
+
+export RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-pi05"
+export VIDEO_OUT_PATH="data/libero/videos/pi05-reference-$RUN_ID"
+if test -e "$VIDEO_OUT_PATH"; then
+  echo "VIDEO EVIDENCE PATH ALREADY EXISTS: $VIDEO_OUT_PATH" >&2
+  exit 1
+fi
+printf 'RUN_ID=%s\nVIDEO_OUT_PATH=%s\n' "$RUN_ID" "$VIDEO_OUT_PATH"
+
 export SERVER_ARGS="--env LIBERO --port 18001 policy:checkpoint --policy.config pi05_libero --policy.dir gs://openpi-assets/checkpoints/pi05_libero"
-export CLIENT_ARGS="--args.port 18001 --args.task-suite-name libero_spatial --args.num-trials-per-task 1 --args.video-out-path data/libero/videos_pi05_reference"
+export CLIENT_ARGS="--args.port 18001 --args.task-suite-name libero_spatial --args.num-trials-per-task 1 --args.video-out-path $VIDEO_OUT_PATH"
 docker compose -p "openpi-tutorial-$USER-pi05-reference" -f examples/libero/compose.yml up --build
 ```
 
@@ -429,10 +494,10 @@ docker compose -p "openpi-tutorial-$USER-pi05-reference" -f examples/libero/comp
 
 ```bash
 docker compose -p "openpi-tutorial-$USER-pi05-reference" -f examples/libero/compose.yml down
-unset SERVER_ARGS CLIENT_ARGS
+unset SERVER_ARGS CLIENT_ARGS RUN_ID VIDEO_OUT_PATH
 ```
 
-这是另一套 `pi05_libero` + 官方 checkpoint 运行，不是教学 checkpoint 的替代 config，也不能把两边 params/assets 互换。可以比较启动、连接与行为现象，但不要把一次短测外推成官方 success rate，也不要把两个视频目录或日志合并成同一实验。
+这是另一套 `pi05_libero` + 官方 checkpoint 运行，不是教学 checkpoint 的替代 config，也不能把两边 params/assets 互换。复制本次精确 `VIDEO_OUT_PATH`，仍用实践 6 的 fresh-file guard 检查该独立目录。可以比较启动、连接与行为现象，但不要把一次短测外推成官方 success rate，也不要把两个视频目录或日志合并成同一实验。
 
 ## 预期结果
 
@@ -444,10 +509,10 @@ unset SERVER_ARGS CLIENT_ARGS
 | 服务端完成模型加载且无 tree/shape/norm 错误 | `pi0_libero_tutorial` 与 checkpoint 可组成 Policy | WebSocket 客户端已经收到 action |
 | 服务端出现 `Connection from ... opened` | 客户端与服务端 host/port 可达 | action 内容或仿真字段一定正确 |
 | 客户端越过等待阶段，episode 持续推进且无 `Caught exception` | 至少一次 observation/action 交换可以驱动控制循环 | 策略会成功完成 task |
-| 已结束 episode 的日志和新 MP4 | 仿真、动作执行和视频写入闭环完成 | 整个 suite 已跑完或达到官方成功率 |
+| 已结束 episode 的日志和本次 `$VIDEO_OUT_PATH` 中的新 MP4 | 仿真、动作执行和新鲜视频证据闭环完成 | 整个 suite 已跑完或达到官方成功率 |
 | action horizon 断言未触发 | 实际返回 chunk 至少覆盖 `replan_steps=5` | 动作质量或坐标语义一定最优 |
 
-`Success: False` 不会自动使本章失败。只要教学 checkpoint 加载、客户端连接、actions 返回、episode 至少推进并留下日志/视频，且没有字段、shape、config 或 normalization 错误，工程验收即可成立。
+`Success: False` 不会自动使本章失败。只要教学 checkpoint 加载、客户端连接、actions 返回、episode 至少推进并在本次唯一视频目录留下新日志/MP4，且没有字段、shape、config 或 normalization 错误，工程验收即可成立。
 
 ## 常见问题
 
@@ -490,7 +555,7 @@ Policy loader 需要 step 目录下的 `params` 与 `assets/<asset_id>/norm_stat
 检查精确 asset id 和 checkpoint 文件：
 
 ```bash
-CHECKPOINT_DIR="checkpoints/pi0_libero_tutorial/libero_lora_demo/${CHECKPOINT_STEP:-499}"
+: "${CHECKPOINT_DIR:?Select and verify a checkpoint first}"
 find "$CHECKPOINT_DIR/assets" -maxdepth 4 -type f -print | sort
 rg -n 'repo_id="openpi-tutorial/libero-small"|extra_delta_transform=True' \
   src/openpi/training/config.py
@@ -565,13 +630,28 @@ docker compose -f examples/libero/compose.yml logs --tail=300 runtime
 
 ### 10. 视频目录不可写或没有新视频
 
-检查 runtime 日志、宿主机路径和可写性：
+检查 runtime 日志、本次唯一 evidence path 和它的父目录；不要回退到共享根目录寻找旧 MP4：
 
 ```bash
+set -euo pipefail
+
+: "${VIDEO_OUT_PATH:?Export the exact VIDEO_OUT_PATH for this run}"
+VIDEO_PARENT=$(dirname "$VIDEO_OUT_PATH")
 docker compose -f examples/libero/compose.yml logs --tail=300 runtime
-ls -ld data data/libero data/libero/videos 2>/dev/null
-find data/libero/videos -maxdepth 1 -type f -name 'rollout_*.mp4' \
-  -printf '%TY-%Tm-%Td %TH:%TM:%TS %p\n' | sort
+ls -ld "$VIDEO_PARENT" 2>/dev/null || true
+if ! test -d "$VIDEO_OUT_PATH"; then
+  echo "VIDEO DIRECTORY FOR THIS RUN DOES NOT EXIST: $VIDEO_OUT_PATH" >&2
+  exit 1
+fi
+NEW_VIDEOS=$(
+  find "$VIDEO_OUT_PATH" -maxdepth 1 -type f -name 'rollout_*.mp4' \
+    -printf '%TY-%Tm-%Td %TH:%TM:%TS %p\n' | sort
+)
+if test -z "$NEW_VIDEOS"; then
+  echo "NO NEW MP4 IN THIS RUN DIRECTORY: $VIDEO_OUT_PATH" >&2
+  exit 1
+fi
+printf '%s\n' "$NEW_VIDEOS"
 ```
 
 视频只在 episode 结束路径写出；刚出现 `Starting episode...` 时没有 MP4 不一定是权限错误。若日志明确是 permission/disk 问题，只修复本章精确目录或改 `--args.video-out-path` 到明确可写的新目录，不要递归改写整个仓库所有权。
@@ -583,13 +663,13 @@ find data/libero/videos -maxdepth 1 -type f -name 'rollout_*.mp4' \
 - [ ] `CHECKPOINT_STEP` 来自完整 499 证据或另一个经验证的数字 step，没有伪造/复制 499；
 - [ ] preflight 证明 config 唯一且仍是 π₀ 双 LoRA、horizon 50、教学 repo 与 `extra_delta_transform=True`；
 - [ ] checkpoint step 中存在 `train_state`、`params` 和正确 asset id 的有限 norm stats；能说明推理不读取 `train_state`；
-- [ ] `SERVER_ARGS` 使用 `pi0_libero_tutorial` 与匹配 step，未用 `pi05_libero` 加载教学 params；
+- [ ] `CHECKPOINT_DIR` 由已验证的 `CHECKPOINT_STEP` 构造；`SERVER_ARGS` 从该变量加载 `pi0_libero_tutorial`，未硬编码或混用 `pi05_libero`；
 - [ ] Compose 静态展开确认 trusted checkout 被挂载到 `/app`，并理解 privileged 与可写挂载风险；
 - [ ] 默认或共享项目的服务端/客户端端口一致；`up`、`ps`、`logs`、`down` 使用同一 project name；
 - [ ] 服务端成功加载教学 checkpoint，没有参数 tree/shape、config 或 norm stats 错误；
 - [ ] 服务端出现 `Connection from ... opened`，或客户端越过等待进入 task/episode；没有把不存在的 `Connected` 日志当要求；
 - [ ] 至少一个真实 policy action 请求成功，chunk 未触发 `len(action_chunk) < replan_steps`，episode 至少推进一个控制周期；
-- [ ] 至少一个 episode 走到 success/failure 记录，且 `data/libero/videos/` 中有对应 MP4；
+- [ ] 本次运行有唯一 `RUN_ID`/`VIDEO_OUT_PATH`；至少一个 episode 走到 success/failure 记录，且该全新目录中有对应 MP4，不使用共享目录旧文件；
 - [ ] 能说明 `num-trials-per-task=1` 仍遍历 suite 的多个 task；
 - [ ] 明确知道教学 500-step checkpoint 任务失败不等于工程失败，本章没有官方 success-rate 要求；
 - [ ] cleanup 没有删除 checkpoint、视频、源码或整个 cache，也没有对别人的 Compose project 执行 `down`。
