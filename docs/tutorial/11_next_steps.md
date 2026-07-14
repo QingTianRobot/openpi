@@ -74,7 +74,7 @@ episode / frame
 | [`examples/libero/main.py`](../../examples/libero/main.py) | suite/trial、`replan_steps`、action chunk、episode 和视频输出 |
 | [`examples/aloha_real/README.md`](../../examples/aloha_real/README.md) | ALOHA 数据转换、已有 normalization assets 与远程推理入口 |
 | [`examples/droid/README_train.md`](../../examples/droid/README_train.md) | 大规模 RLDS 与小规模自定义 DROID/LeRobot 两种训练路线 |
-| [`examples/ur5/README.md`](../../examples/ur5/README.md) | 自定义 inputs/outputs、data config 和 delta action 示例 |
+| [`examples/ur5/README.md`](../../examples/ur5/README.md) | 只作为 inputs/outputs、repack 和 delta action 的概念草图；其中部分 API 调用已落后于当前源码，不能逐字复制 |
 
 ## 动手实践
 
@@ -160,18 +160,20 @@ episode / frame
 
 ### 路线 C：接入自有数据、仿真平台或真实机器人
 
-这条路线先做协议适配，再谈模型性能。建议按以下顺序阅读现有例子：
+这条路线先做协议适配，再谈模型性能。实现时优先以当前源码和仍在维护的 LIBERO/ALOHA/DROID 路径为准：
 
-1. [`examples/ur5/README.md`](../../examples/ur5/README.md)：最小化理解自定义 inputs/outputs、repack 和 delta action；
-2. [`examples/aloha_real/README.md`](../../examples/aloha_real/README.md)：理解真实平台数据、已有 stats 和远程服务边界；
-3. [`examples/droid/README_train.md`](../../examples/droid/README_train.md)：比较小数据 LeRobot 与大规模 RLDS；
-4. [`examples/droid/README.md`](../../examples/droid/README.md)：理解机器人控制机与 GPU Policy Server 分离；
-5. [`examples/libero/README.md`](../../examples/libero/README.md)：把仿真闭环作为接入和回归测试基准。
+1. [`LeRobotLiberoDataConfig`](../../src/openpi/training/config.py) 与 [`libero_policy.py`](../../src/openpi/policies/libero_policy.py)：核对当前 `DataConfigFactory`、transform 和在线 observation schema；
+2. [`examples/libero/README.md`](../../examples/libero/README.md)：把仿真闭环作为接入和回归测试基准；
+3. [`examples/aloha_real/README.md`](../../examples/aloha_real/README.md)：理解真实平台数据、已有 stats 和远程服务边界；
+4. [`examples/droid/README_train.md`](../../examples/droid/README_train.md) 与 [`examples/droid/README.md`](../../examples/droid/README.md)：比较 LeRobot/RLDS 数据路线，并理解机器人控制机与 GPU Policy Server 分离；
+5. [`examples/ur5/README.md`](../../examples/ur5/README.md)：只用于建立 inputs/outputs、repack 和 delta action 的概念。它相对当前 API 已过时；实现必须遵循当前 `DataConfigFactory.create(assets_dirs, model_config)`、`create_base_config(assets_dirs, model_config)` 和 `model_config` 驱动 transform/normalization 的签名，不能逐字复制其中代码。
 
 #### 保持不变的边界
 
 - Policy Server/WebSocket 仍只交换经过定义的 observation、prompt 和 action chunk；
-- 训练与推理复用同一组 repack/data transforms，输出端执行与训练目标相反的必要逆变换；
+- `DataConfig.repack_transforms` 只把离线 dataset 样本映射成机器人/环境 schema，属于训练数据加载路径；正常在线推理客户端必须直接发送 **post-repack** schema，不应再套用 dataset repack；
+- data transforms、model transforms、normalization 和动作协议在训练/推理间按各自 input/output 方向共享；输出端执行所需的 unnormalize 与 delta/absolute 逆变换；
+- 不要对在线 observation 做“双重 repack”。若推理端字段仍是 dataset 原始 key，应先修客户端协议；不要把训练 repack 再塞进 live policy 来掩盖 schema 漂移；
 - config、基础参数、stats/assets、action dimension/horizon 必须匹配；
 - 所有真实机器人动作在进入底层控制前经过独立的单位、速率、位置/速度/力矩、工作空间和夹爪限制。
 
@@ -201,11 +203,15 @@ episode / frame
 
 ### 推荐进阶阅读顺序
 
-1. [项目架构深读](../architecture_zh.md)：先把模块边界和一次请求的数据流连起来；
-2. [JAX 在 openpi 中的使用](../jax_in_openpi_zh.md)：准备修改训练、sharding 或性能路径时阅读；
-3. [模型建立与推理深读](../model_build_and_inference_zh.md)：理解模型创建、参数状态和推理采样；
+先以已提交的课程章节和当前源码为主：
+
+1. [第 04 章：openpi 架构](04_openpi_architecture.md)与 [`src/openpi/policies/policy_config.py`](../../src/openpi/policies/policy_config.py)：连接一次请求、transform 与 Policy；
+2. [第 06 章：JAX 与 π₀ 基础](06_jax_and_pi0_basics.md)与 [`scripts/train.py`](../../scripts/train.py)：准备修改训练、JIT、sharding 或性能路径；
+3. [`src/openpi/models/pi0.py`](../../src/openpi/models/pi0.py)与 [`src/openpi/models/pi0_config.py`](../../src/openpi/models/pi0_config.py)：理解模型建立、参数状态、loss 与动作采样；
 4. [Normalization statistics](../norm_stats.md)：决定复用还是重算机器人统计量；
 5. [Remote inference](../remote_inference.md)：设计机器人控制机与 GPU 服务端的接口边界。
+
+本工作区若已有以下**可选本地进阶资料**，可按代码路径打开；它们不是已提交教程的必需依赖：`docs/architecture_zh.md`、`docs/jax_in_openpi_zh.md`、`docs/model_build_and_inference_zh.md`。
 
 ## 预期结果
 

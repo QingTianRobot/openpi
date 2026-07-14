@@ -6,7 +6,7 @@
 
 ## 英文字母索引
 
-[A](#index-a) · [C](#index-c) · [D](#index-d) · [E](#index-e) · [F](#index-f) · [G](#index-g) · [J](#index-j) · [L](#index-l) · [M](#index-m) · [N](#index-n) · [O](#index-o) · [P](#index-p) · [R](#index-r) · [S](#index-s) · [T](#index-t) · [V](#index-v) · [W](#index-w) · [X](#index-x)
+[A](#index-a) · [C](#index-c) · [D](#index-d) · [E](#index-e) · [F](#index-f) · [G](#index-g) · [I](#index-i) · [J](#index-j) · [L](#index-l) · [M](#index-m) · [N](#index-n) · [O](#index-o) · [P](#index-p) · [R](#index-r) · [S](#index-s) · [T](#index-t) · [V](#index-v) · [W](#index-w) · [X](#index-x)
 
 <a id="index-a"></a>
 
@@ -31,6 +31,10 @@
 <a id="index-g"></a>
 
 **G**：[GraphDef](#term-graphdef)
+
+<a id="index-i"></a>
+
+**I**：[Imitation learning](#term-imitation-learning)
 
 <a id="index-j"></a>
 
@@ -166,6 +170,12 @@
 
 参见[第 01 章](01_vla_and_robotics_basics.md)和[第 06 章](06_jax_and_pi0_basics.md)。
 
+<a id="term-imitation-learning"></a>
+
+### Imitation learning — 模仿学习
+
+从 demonstration 中学习 observation/prompt 到 action 的映射；openpi 微调用示范动作监督模型预测 action chunk，而不是在本课程训练循环中通过在线奖励探索。入门直觉见[第 01 章](01_vla_and_robotics_basics.md#模仿学习把专家轨迹变成训练题)。
+
 <a id="term-prompt"></a>
 
 ### Prompt — 提示词 / 任务指令
@@ -210,7 +220,7 @@ openpi 小规模自定义数据路线使用的数据格式/加载接口；repo i
 
 ### Repack transform — 字段重组变换
 
-把数据集原始嵌套 key 映射为策略适配器期望的 key；它改变字段组织，不应暗中改变数值语义。
+把 dataset 原始嵌套 key 映射为机器人/环境 schema 的训练数据变换；正常在线客户端应直接发送 post-repack schema，因此不应再次套用 dataset repack 或造成“双重 repack”。它改变字段组织，不应暗中改变数值语义。
 
 <a id="term-data-transform"></a>
 
@@ -272,7 +282,7 @@ checkpoint 旁的非参数推理依赖，本课程主要指 normalization statis
 
 ## JAX 与 Flax NNX
 
-参见[第 06 章](06_jax_and_pi0_basics.md)、[JAX 深读](../jax_in_openpi_zh.md)和[模型建立与推理深读](../model_build_and_inference_zh.md)。
+主要参见[第 06 章](06_jax_and_pi0_basics.md)、[`scripts/train.py`](../../scripts/train.py)、[`src/openpi/models/pi0.py`](../../src/openpi/models/pi0.py)和[`src/openpi/models/pi0_config.py`](../../src/openpi/models/pi0_config.py)。本工作区若另有 `docs/jax_in_openpi_zh.md` 或 `docs/model_build_and_inference_zh.md`，它们只是可选本地进阶资料，不是本术语表的必需依赖。
 
 <a id="term-jax"></a>
 
@@ -340,10 +350,12 @@ openpi 轻量客户端与 Policy Server 交换 observation/action 的通信通�
 
 ## 进一步查阅
 
-- [项目架构深读](../architecture_zh.md)
-- [JAX 在 openpi 中的使用](../jax_in_openpi_zh.md)
-- [模型建立与推理深读](../model_build_and_inference_zh.md)
+- [第 04 章：openpi 架构](04_openpi_architecture.md)与[`src/openpi/policies/policy_config.py`](../../src/openpi/policies/policy_config.py)
+- [第 06 章：JAX 与 π₀ 基础](06_jax_and_pi0_basics.md)与[`scripts/train.py`](../../scripts/train.py)
+- [`src/openpi/models/pi0.py`](../../src/openpi/models/pi0.py)与[`src/openpi/models/pi0_config.py`](../../src/openpi/models/pi0_config.py)
 - [Normalization statistics](../norm_stats.md)
 - [Remote inference](../remote_inference.md)
+
+本工作区已有时可选查阅以下本地代码路径：`docs/architecture_zh.md`、`docs/jax_in_openpi_zh.md`、`docs/model_build_and_inference_zh.md`。这些路径不是已提交教程的必需依赖。
 
 [课程入口：README](README.md) · [第 11 章：规划下一阶段实验](11_next_steps.md) · [故障排查手册](troubleshooting.md)
