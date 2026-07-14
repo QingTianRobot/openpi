@@ -9,7 +9,7 @@
 - 按仓库 `README.md` 初始化子模块，并安装 Python 3.11 的主项目 `uv` 环境；
 - 解释为什么 openpi 主环境与 LIBERO/MuJoCo 评测环境不能混装依赖；
 - 说明推荐评测时 `openpi_server` 与 `runtime` 两个容器分别做什么，以及它们如何通过 WebSocket 通信；
-- 用 `nvidia-smi`、JAX、Docker Compose、子模块和磁盘命令完成一次证据优先的环境自检；
+- 用 `/etc/os-release`、`nvidia-smi`、JAX、Docker Compose、子模块和磁盘命令完成一次证据优先的环境自检；
 - 知道 checkpoint、数据集、Docker 镜像、训练产物和评测视频大致会占用哪些目录；
 - 在 EGL 渲染失败时有条件地回退到 GLX，而不是一开始就修改默认渲染路径。
 
@@ -40,7 +40,7 @@
 
 开始安装前逐项确认：
 
-- [ ] 宿主机是 Ubuntu 22.04；
+- [ ] 已运行 `grep '^PRETTY_NAME=' /etc/os-release` 并保存实际输出；标准课程基线应明确显示 Ubuntu 22.04；
 - [ ] 计划使用 NVIDIA A100 或 H100，且当前用户能运行 `nvidia-smi`；
 - [ ] `uv --version` 能输出版本号；
 - [ ] `docker compose version` 能输出 Compose 版本；
@@ -188,6 +188,7 @@ EGL 正常时不需要先执行 `xhost`。
 逐条运行，不要只保存最后一行输出：
 
 ```bash
+grep '^PRETTY_NAME=' /etc/os-release
 nvidia-smi
 uv --version
 docker compose version
@@ -197,13 +198,14 @@ df -h .
 
 观察重点：
 
+- `/etc/os-release` 的 `PRETTY_NAME` 应明确显示 Ubuntu 22.04；如果是其他版本，应把实际值记录为课程基线偏离，而不是凭印象勾选“Ubuntu 22.04”；
 - `nvidia-smi` 应列出至少一张计划使用的 NVIDIA GPU，而不是驱动通信错误；
 - `uv --version` 应输出可识别的版本；
 - `docker compose version` 应表明 Compose 子命令可用；
 - `git submodule status` 中课程所需子模块的行首应为空格；`-` 表示未初始化，`+` 表示 checkout 与父仓库记录的 commit 不同，`U` 表示冲突；
 - `df -h .` 的 `Avail` 应至少为 100 GB，同时留意仓库和 Docker 数据目录可能不在同一文件系统。
 
-如果此时子模块行首是 `-`，不需要慌张：这正是下一步要修复的状态。`+` 和 `U` 也不是标准通过状态；应先核对本地工作与预期 commit。若 `nvidia-smi`、Compose 或磁盘条件不满足，应先解决宿主机前置条件，避免在大型依赖安装或镜像构建中途才失败。
+如果此时子模块行首是 `-`，不需要慌张：这正是下一步要修复的状态。`+` 和 `U` 也不是标准通过状态；应先核对本地工作与预期 commit。若 OS 不是 Ubuntu 22.04，先保存实际发行版并明确这是未覆盖的兼容性偏离；若 `nvidia-smi`、Compose 或磁盘条件不满足，也应先解决宿主机前置条件，避免在大型依赖安装或镜像构建中途才失败。
 
 Compose 命令存在还不能证明容器可以使用 GPU。运行一个不依赖本仓库镜像的 smoke test：
 
@@ -306,6 +308,7 @@ docker compose -f examples/libero/compose.yml config
 
 | 命令或现象 | 可以得出的结论 | 仍然不能证明什么 |
 | --- | --- | --- |
+| `grep '^PRETTY_NAME=' /etc/os-release` 显示 Ubuntu 22.04 | 当前运行环境的发行版名称符合课程支持假设 | 驱动、Python、Docker、JAX 或 LIBERO 已经可用 |
 | `nvidia-smi` 列出 A100/H100 | 宿主机能与 NVIDIA 驱动通信 | JAX 和 Docker 一定能使用 GPU |
 | `uv --version` 输出版本 | `uv` 命令可用 | 项目依赖已经安装完整 |
 | `docker compose version` 输出版本 | Compose 插件可用 | Docker daemon、GPU runtime 和镜像构建一定正常 |
@@ -319,7 +322,7 @@ docker compose -f examples/libero/compose.yml config
 安装与自检完成后，你应该留下一个简短记录，至少包含：
 
 ```text
-宿主机：Ubuntu 22.04，GPU 型号，nvidia-smi 状态
+宿主机：/etc/os-release 的实际 PRETTY_NAME（课程预期 Ubuntu 22.04），GPU 型号，nvidia-smi 状态
 主环境：Python 3.11.x，uv 版本，jax.devices() 摘要
 容器：Docker Compose 版本，独立 CUDA 容器 GPU smoke test，Compose 配置可解析
 子模块：课程所需行首为空格；任何非空白例外均记录路径、commit、原因和影响
@@ -332,7 +335,7 @@ docker compose -f examples/libero/compose.yml config
 本章中的安装和预检命令是给学习者在目标机器上执行的操作说明，不是伪造的成功日志。编写本章时做了两类核对：
 
 - **静态核对**：从 `README.md`、`pyproject.toml`、LIBERO `Dockerfile` 和 `compose.yml` 确认 Python 3.11/3.8 边界、安装命令、两个 service、host networking、缓存挂载和 EGL 默认值；
-- **当前编写环境实测（2026-07-14）**：`uv --version` 与 `docker compose version` 可运行，仓库分区空间超过 100 GB；但子模块状态行首为 `-`，`nvidia-smi` 无法与驱动通信。因此该环境**没有通过**完整 preflight。
+- **当前文档环境实测**：原有 2026-07-14 检查显示 `uv --version` 与 `docker compose version` 可运行、仓库分区空间超过 100 GB，但子模块状态行首为 `-`，`nvidia-smi` 无法与驱动通信；2026-07-15 复核 `grep '^PRETTY_NAME=' /etc/os-release` 得到 `PRETTY_NAME="Ubuntu 26.04 LTS"`，也不符合课程的 Ubuntu 22.04 基线。因此该环境**没有通过**完整 preflight，本文不把它当作 Ubuntu 22.04 的运行证明。
 
 本章编写过程中没有运行或通过 `docker run --rm --gpus all nvidia/cuda:12.2.2-base-ubuntu22.04 nvidia-smi`，也没有把 `uv run --no-sync python -c "import jax; print(jax.devices())"` 的结果作为已通过证据。因此不声称当前环境的 Docker GPU 或 JAX/GPU 检查成功。你的验收必须以自己目标机器的实际输出为准。
 
@@ -469,7 +472,8 @@ GLX 需要 X11 socket 与访问权限。按 [LIBERO README](../../examples/liber
 
 进入下一章前，逐项提供命令输出或口头解释：
 
-- [ ] 能说出课程支持假设：Ubuntu 22.04、A100/H100、主项目 Python 3.11、Docker Compose、至少 100 GB 可用磁盘；
+- [ ] 已保存 `grep '^PRETTY_NAME=' /etc/os-release` 的实际输出；标准通过应显示 Ubuntu 22.04，其他值已明确记录为课程基线偏离且不冒充标准 preflight 通过；
+- [ ] 能说出其余课程支持假设：A100/H100、主项目 Python 3.11、Docker Compose、至少 100 GB 可用磁盘；
 - [ ] `git submodule status` 的课程所需子模块行首为空格；若有意保留非空白状态，已记录路径、前缀、实际/期望 commit、原因和影响，并明确标为课程基线例外；
 - [ ] `uv run --no-sync python --version` 输出 Python 3.11.x；
 - [ ] `uv run --no-sync python -c "import jax; print(jax.devices())"` 至少列出一个 GPU；
