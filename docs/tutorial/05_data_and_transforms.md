@@ -253,7 +253,7 @@ LIBERO 原始 action 已经是 delta action。`LeRobotLiberoDataConfig.extra_del
 | [`src/openpi/models/pi0_config.py`](../../src/openpi/models/pi0_config.py) | π₀/π₀.₅ 的 `action_dim`、`action_horizon`、`max_token_len` 和输入规格 |
 | [`src/openpi/models/pi0_fast.py`](../../src/openpi/models/pi0_fast.py) | FAST `sample_actions()` 怎样自回归返回 token-ID 序列 |
 
-更完整的系统背景可读[项目架构深读](../architecture_zh.md)和[模型建立与推理深读](../model_build_and_inference_zh.md)；遇到术语或跨层故障，可查后续补齐的[课程术语表](glossary.md)与[故障排查手册](troubleshooting.md)。
+系统背景优先回读[第 04 章](04_openpi_architecture.md)、[`policy_config.py`](../../src/openpi/policies/policy_config.py)和当前模型源码；遇到术语或跨层故障，可查[课程术语表](glossary.md)与[故障排查手册](troubleshooting.md)。本工作区若存在 `docs/architecture_zh.md` 或 `docs/model_build_and_inference_zh.md`，它们只是可选本地深读资料，不是已提交教程的必需依赖。
 
 ## 动手实践
 
@@ -401,7 +401,7 @@ rg -n -B 2 -A 10 '"observation/image": "image"' src/openpi/training/config.py
 
 `LiberoInputs` 对 π₀/π₀.₅ 将缺失右腕 mask 设为 `False`，对 π₀-FAST 按其约定设为 `True`。先检查 `model_type`，不要脱离模型协议把所有 padding 图像一律设成相同 mask。
 
-更多归一化资料见 [`docs/norm_stats.md`](../norm_stats.md)；跨层排错见后续补齐的[故障排查手册](troubleshooting.md)。
+更多归一化资料见 [`docs/norm_stats.md`](../norm_stats.md)；跨层排错见[故障排查手册](troubleshooting.md)。
 
 ## 本章验收
 

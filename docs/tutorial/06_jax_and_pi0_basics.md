@@ -15,7 +15,7 @@
 - 说明 LoRA 减少了哪些训练内存，又没有减少哪些内存；
 - 面对第一次 JIT 很慢、OOM、NaN 或反复编译时，先收集证据再调整配置。
 
-本章只建立完成后续微调所需的最小知识，不试图替代完整 JAX 或扩散/流模型课程。更深入的实现细节可读[项目中的 JAX 深读](../jax_in_openpi_zh.md)。
+本章只建立完成后续微调所需的最小知识，不试图替代完整 JAX 或扩散/流模型课程。更深入的实现细节以本章源码地图中的当前实现为准；本工作区若存在 `docs/jax_in_openpi_zh.md`，可把它作为可选本地深读资料，而不是已提交教程的必需依赖。
 
 ## 前置条件
 
@@ -367,9 +367,9 @@ GraphDef + full State
 | [`src/openpi/shared/nnx_utils.py`](../../src/openpi/shared/nnx_utils.py) | `module_jit`、`PathRegex` 和按 filter 映射 State |
 | [`src/openpi/training/sharding.py`](../../src/openpi/training/sharding.py) | device mesh、data/FSDP 轴和大数组分片条件 |
 | [`src/openpi/models/pi0_fast.py`](../../src/openpi/models/pi0_fast.py) | π₀-FAST 的 next-token loss 与自回归生成，作为对照分支 |
-| [JAX in openpi 深读](../jax_in_openpi_zh.md) | 本章之后继续阅读 JAX transform、编译和工程实现 |
+| [第 04 章：openpi 架构](04_openpi_architecture.md) | 把本章的 JAX/NNX 对象放回 Policy、transform、服务和训练数据流 |
 
-遇到陌生缩写可查后续补齐的[课程术语表](glossary.md)；遇到环境、编译、显存或训练数值问题可查后续补齐的[故障排查手册](troubleshooting.md)。
+遇到陌生缩写可查[课程术语表](glossary.md)；遇到环境、编译、显存或训练数值问题可查[故障排查手册](troubleshooting.md)。
 
 ## 动手实践
 
@@ -542,7 +542,7 @@ uv run --no-sync python -c 'import jax; print(jax.__version__, jax.devices())'
 
 不是。它表示 mesh 的 FSDP 轴大小为 2；总 device count 还必须能被 2 整除。用 `make_mesh()` 和启动时的 sharding 日志确认布局，具体数组选择规则见前面的折叠进阶说明。
 
-更多跨层诊断路径见后续补齐的[故障排查手册](troubleshooting.md)。
+更多跨层诊断路径见[故障排查手册](troubleshooting.md)。
 
 ## 本章验收
 

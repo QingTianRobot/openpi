@@ -16,7 +16,7 @@
 - 区分“策略完成任务”与“服务、通信、动作和仿真接口正确”；
 - 用证据定位 config、checkpoint、assets、缓存、端口、GPU、渲染和视频写入问题。
 
-遇到陌生缩写可查后续补齐的[课程术语表](glossary.md)；跨章节问题可查后续补齐的[故障排查手册](troubleshooting.md)。
+遇到陌生缩写可查[课程术语表](glossary.md)；跨章节问题可查[故障排查手册](troubleshooting.md)。
 
 ## 前置条件
 

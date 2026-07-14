@@ -153,7 +153,7 @@ PY
 | [第 05 章：数据协议与 Transform](05_data_and_transforms.md) | 从 LeRobot 字段到模型 `Observation/Actions` 的后续路径 |
 | [modified LIBERO RLDS](https://huggingface.co/datasets/openvla/modified_libero_rlds) | 原始数据下载入口与数据集说明；本章不自动下载 |
 
-遇到陌生缩写可查后续补齐的[课程术语表](glossary.md)；遇到 TFDS、缓存、磁盘或数据质量问题可查后续补齐的[故障排查手册](troubleshooting.md)。
+遇到陌生缩写可查[课程术语表](glossary.md)；遇到 TFDS、缓存、磁盘或数据质量问题可查[故障排查手册](troubleshooting.md)。
 
 ## 动手实践
 

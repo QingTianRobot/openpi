@@ -185,7 +185,7 @@ config name
 | [第 07 章：准备小规模 LIBERO 数据集](07_prepare_small_dataset.md) | `openpi-tutorial/libero-small` 的生成、metadata、8D/7D 与数据质量检查 |
 | [`docs/norm_stats.md`](../norm_stats.md) | 何时复用预训练统计、何时为新数据计算统计，以及 action-space 约定 |
 
-遇到陌生缩写可查后续补齐的[课程术语表](glossary.md)；遇到环境、数据、训练或 checkpoint 错误可查后续补齐的[故障排查手册](troubleshooting.md)。
+遇到陌生缩写可查[课程术语表](glossary.md)；遇到环境、数据、训练或 checkpoint 错误可查[故障排查手册](troubleshooting.md)。
 
 ## 动手实践
 

@@ -13,7 +13,7 @@
 - 用日志、容器状态和回放视频判断闭环是否真的开始运行；
 - 区分首次镜像构建、checkpoint 下载、JIT 编译的正常等待与真正的故障。
 
-本章只运行仓库默认的 LIBERO **预训练推理**：配置是 `pi05_libero`，模型属于 π₀.₅。后续 LoRA 教学会创建 `pi0_libero_tutorial`，它属于 π₀；两套配置及 checkpoint 不能混用。遇到陌生术语可查后续补齐的[课程术语表](glossary.md)，跨章节问题可查后续补齐的[故障排查手册](troubleshooting.md)。
+本章只运行仓库默认的 LIBERO **预训练推理**：配置是 `pi05_libero`，模型属于 π₀.₅。后续 LoRA 教学会创建 `pi0_libero_tutorial`，它属于 π₀；两套配置及 checkpoint 不能混用。遇到陌生术语可查[课程术语表](glossary.md)，跨章节问题可查[故障排查手册](troubleshooting.md)。
 
 ## 前置条件
 

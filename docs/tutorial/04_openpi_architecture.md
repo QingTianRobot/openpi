@@ -148,7 +148,7 @@ Observation
 7. [`models/model.py`](../../src/openpi/models/model.py)：看 `Observation.from_dict` 和 `BaseModel.sample_actions` 契约；
 8. [`training/config.py`](../../src/openpi/training/config.py)：回到最上层，确认 `pi05_libero` 选择了什么模型和数据配置。
 
-若想继续阅读模型内部，不要在本章复制展开全部实现，可转到[项目架构深读](../architecture_zh.md)和[模型建立与推理深读](../model_build_and_inference_zh.md)。
+若想继续阅读模型内部，先沿上面的当前源码入口和[第 06 章](06_jax_and_pi0_basics.md)继续。本工作区若存在 `docs/architecture_zh.md` 或 `docs/model_build_and_inference_zh.md`，可把它们作为可选本地深读资料；它们不是已提交教程的必需依赖。
 
 ## 动手实践
 
@@ -257,7 +257,7 @@ sed -n '/dependencies = \[/,/^\]/p' pyproject.toml
 
 不是。WebSocket 是进程边界，不是固定部署地点。它可以连接同机进程、两个容器或远端主机。排错时应先记录当前实际的 host、port、容器网络和启动命令，不要从“client/server”名称推断物理位置。
 
-更多跨章节排错入口见后续补齐的[故障排查手册](troubleshooting.md)，术语见后续补齐的[课程术语表](glossary.md)。
+更多跨章节排错入口见[故障排查手册](troubleshooting.md)，术语见[课程术语表](glossary.md)。
 
 ## 本章验收
 
