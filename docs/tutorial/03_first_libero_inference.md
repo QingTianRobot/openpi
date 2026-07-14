@@ -112,11 +112,25 @@ LIBERO 环境          runtime / openpi-client              openpi_server / Poli
 
 ### 实践 1：启动最小的预训练评测
 
+无论使用默认端口还是共享主机端口，先为本次运行生成唯一证据标识和一个尚不存在的视频目录。guard 拒绝复用旧目录，避免把历史 MP4 误当成本次结果：
+
+```bash
+export RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+export VIDEO_OUT_PATH="data/libero/videos/pi05-first-inference-$RUN_ID"
+if test -e "$VIDEO_OUT_PATH"; then
+  echo "VIDEO EVIDENCE PATH ALREADY EXISTS: $VIDEO_OUT_PATH" >&2
+  exit 1
+fi
+printf 'RUN_ID=%s\nVIDEO_OUT_PATH=%s\n' "$RUN_ID" "$VIDEO_OUT_PATH"
+```
+
+`VIDEO_OUT_PATH` 是容器 `/app` 下的相对路径；Compose 把仓库根目录挂载到 `/app`，所以宿主机会在同一个路径看到本次回放。随后从下面两个启动方案中选择一个，不要同时启动。
+
 在独占的开发主机上，可以设置默认 LIBERO policy，并把每个 task 的 trial 数从默认 50 降到 1：
 
 ```bash
 export SERVER_ARGS="--env LIBERO"
-export CLIENT_ARGS="--args.task-suite-name libero_spatial --args.num-trials-per-task 1"
+export CLIENT_ARGS="--args.task-suite-name libero_spatial --args.num-trials-per-task 1 --args.video-out-path $VIDEO_OUT_PATH"
 docker compose -f examples/libero/compose.yml up --build
 ```
 
@@ -124,7 +138,7 @@ docker compose -f examples/libero/compose.yml up --build
 
 ```bash
 export SERVER_ARGS="--env LIBERO --port 18000"
-export CLIENT_ARGS="--args.port 18000 --args.task-suite-name libero_spatial --args.num-trials-per-task 1"
+export CLIENT_ARGS="--args.port 18000 --args.task-suite-name libero_spatial --args.num-trials-per-task 1 --args.video-out-path $VIDEO_OUT_PATH"
 docker compose -p "openpi-tutorial-$USER" -f examples/libero/compose.yml up --build
 ```
 
@@ -142,14 +156,28 @@ docker compose -p "openpi-tutorial-$USER" -f examples/libero/compose.yml up --bu
 - 客户端的 `Task suite: ...` 在构造 WebSocket 客户端**之前**打印，因此它可能先于 `Waiting for server at ...` 出现，不能单独证明已经连接；
 - 轻量客户端没有显式的 `Connected` 日志。可靠的连接证据是等待信息之后客户端继续打印 `Task: ...` 与 `Starting episode...`，或者服务端打印源码中的 `Connection from ... opened`；
 - 建立连接后，客户端继续打印当前任务的自然语言描述、episode 开始/完成进度、`Success: True` 或 `Success: False`，以及累计 episode/成功数；
-- 每个已结束的 episode 会在宿主机 `data/libero/videos/` 下保存一个以 `success` 或 `failure` 结尾的 MP4 回放。
+- 每个已结束的 episode 会在本次精确的 `$VIDEO_OUT_PATH` 下保存一个以 `success` 或 `failure` 结尾的 MP4 回放。
 
 另开终端可以收集容器与文件证据：
 
 ```bash
 docker compose -f examples/libero/compose.yml ps
 docker compose -f examples/libero/compose.yml logs --tail=200 openpi_server runtime
-find data/libero/videos -maxdepth 1 -type f -name 'rollout_*.mp4' -printf '%TY-%Tm-%Td %TH:%TM:%TS %p\n' | sort
+
+: "${VIDEO_OUT_PATH:?Export the exact VIDEO_OUT_PATH from practice 1}"
+if ! test -d "$VIDEO_OUT_PATH"; then
+  echo "THIS RUN HAS NOT CREATED ITS VIDEO DIRECTORY: $VIDEO_OUT_PATH" >&2
+  exit 1
+fi
+NEW_VIDEOS=$(
+  find "$VIDEO_OUT_PATH" -maxdepth 1 -type f -name 'rollout_*.mp4' \
+    -printf '%TY-%Tm-%Td %TH:%TM:%TS %p\n' | sort
+)
+if test -z "$NEW_VIDEOS"; then
+  echo "NO MP4 EVIDENCE FOR THIS RUN: $VIDEO_OUT_PATH" >&2
+  exit 1
+fi
+printf '%s\n' "$NEW_VIDEOS"
 ```
 
 若使用了共享主机示例，前两条命令也必须带相同的 project name：
@@ -191,7 +219,7 @@ rg -n -C 3 'task_description = task\.language' examples/libero/main.py
 ```bash
 docker compose -f examples/libero/compose.yml ps
 docker compose -f examples/libero/compose.yml down
-unset SERVER_ARGS CLIENT_ARGS
+unset SERVER_ARGS CLIENT_ARGS RUN_ID VIDEO_OUT_PATH
 ```
 
 如果使用了共享主机的命名项目与 `18000` 端口示例：
@@ -199,10 +227,10 @@ unset SERVER_ARGS CLIENT_ARGS
 ```bash
 docker compose -p "openpi-tutorial-$USER" -f examples/libero/compose.yml ps
 docker compose -p "openpi-tutorial-$USER" -f examples/libero/compose.yml down
-unset SERVER_ARGS CLIENT_ARGS
+unset SERVER_ARGS CLIENT_ARGS RUN_ID VIDEO_OUT_PATH
 ```
 
-不要在命名项目启动后改用不带 `-p` 的 `ps` 或 `down`。如果 `ps` 没有列出运行中的 service，说明本次进程已停止；想同时查看已停止的容器，可追加 `-a`。`down` 的默认范围是停止并移除所选 Compose 项目的容器及其可移除网络资源。它不会删除已构建镜像、Docker build cache，也不会删除宿主机 bind mount 中的 `data/libero/videos` 或 `${OPENPI_DATA_HOME:-$HOME/.cache/openpi}` checkpoint 缓存。最后 `unset` 可避免本章参数意外影响同一 shell 中的后续 Compose 运行。本章没有理由使用 `down --rmi all`、`docker system prune` 或直接删除整个模型缓存。
+不要在命名项目启动后改用不带 `-p` 的 `ps` 或 `down`。如果 `ps` 没有列出运行中的 service，说明本次进程已停止；想同时查看已停止的容器，可追加 `-a`。`down` 的默认范围是停止并移除所选 Compose 项目的容器及其可移除网络资源。它不会删除已构建镜像、Docker build cache，也不会删除宿主机 bind mount 中的本次 `$VIDEO_OUT_PATH` 或 `${OPENPI_DATA_HOME:-$HOME/.cache/openpi}` checkpoint 缓存。最后 `unset` 可避免本章参数意外影响同一 shell 中的后续 Compose 运行。本章没有理由使用 `down --rmi all`、`docker system prune` 或直接删除整个模型缓存。
 
 ## 预期结果
 
@@ -213,7 +241,7 @@ unset SERVER_ARGS CLIENT_ARGS
 | 两个 service 都启动，服务端有创建/监听相关日志 | Compose 和 Policy Server 已进入运行路径 | checkpoint 一定已完成首次推理 |
 | 等待信息后客户端继续打印 `Task:`/`Starting episode...`，或服务端打印 `Connection from ... opened` | WebSocket 的 host/port 路径可达 | observation 字段和动作 shape 一定正确 |
 | 日志出现 task 描述和 episode 开始/累计进度 | LIBERO task suite 与仿真循环已经推进 | 策略一定会成功完成任务 |
-| 日志出现 success/failure，且目录中有新 MP4 | 至少一个 episode 已结束并保存回放 | 整个 suite 已跑完或达到官方成功率 |
+| 日志出现 success/failure，且本次唯一 `$VIDEO_OUT_PATH` 中有新 MP4 | 至少一个 episode 已结束并保存本次回放 | 整个 suite 已跑完或达到官方成功率 |
 | 后续重规划没有 action 长度断言 | 返回的 action horizon 至少覆盖当前 `replan_steps` | 自定义 checkpoint 与其他配置也一定兼容 |
 
 ### 本文的验证边界
@@ -272,12 +300,17 @@ unset CONTAINER_NAME
 确认归属后停止你有权停止的旧服务，或者让服务端和客户端一起改用同一个空闲端口，并给 Compose 项目一个唯一名称，例如复用前面的共享主机方案：
 
 ```bash
+: "${VIDEO_OUT_PATH:?Run practice 1 to create a fresh evidence path first}"
+if test -e "$VIDEO_OUT_PATH"; then
+  echo "VIDEO EVIDENCE PATH WAS ALREADY CREATED; GENERATE A NEW RUN_ID: $VIDEO_OUT_PATH" >&2
+  exit 1
+fi
 export SERVER_ARGS="--env LIBERO --port 18000"
-export CLIENT_ARGS="--args.port 18000 --args.task-suite-name libero_spatial --args.num-trials-per-task 1"
+export CLIENT_ARGS="--args.port 18000 --args.task-suite-name libero_spatial --args.num-trials-per-task 1 --args.video-out-path $VIDEO_OUT_PATH"
 docker compose -p "openpi-tutorial-$USER" -f examples/libero/compose.yml up --build
 ```
 
-只改一侧端口会造成连接失败；后续 `ps`、`logs` 和 `down` 也必须继续使用 `-p "openpi-tutorial-$USER"`。
+这条恢复启动命令仍依赖实践 1 生成且尚未被使用的 `$VIDEO_OUT_PATH`；若旧启动已经创建了该目录，应重新执行实践 1 的 RUN_ID/目录 guard，为重试生成新目录。只改一侧端口会造成连接失败；后续 `ps`、`logs` 和 `down` 也必须继续使用 `-p "openpi-tutorial-$USER"`。
 
 ### 4. 客户端一直显示等待服务端
 
@@ -350,7 +383,7 @@ docker compose -f examples/libero/compose.yml logs --tail=300 runtime
 - [ ] 服务端日志证明它进入默认 LIBERO policy 的加载与监听路径，且你能说出配置 `pi05_libero` 和 checkpoint `gs://openpi-assets/checkpoints/pi05_libero`；
 - [ ] 能说明 `Task suite:` 可能先于等待日志，客户端没有显式 `Connected`；等待后出现 `Task:`/`Starting episode...` 或服务端出现 `Connection from ... opened` 才能证明已经连接；
 - [ ] 至少一个 episode 已开始并推进，日志中没有 observation 字段、WebSocket 或 action shape 的立即错误；
-- [ ] 至少能提供一个已结束 episode 的 success/failure 日志，并在 `data/libero/videos` 找到对应回放；成功率高低不是本章验收条件；
+- [ ] 至少能提供一个已结束 episode 的 success/failure 日志，并在本次精确且唯一的 `$VIDEO_OUT_PATH` 中找到新 MP4；成功率高低不是本章验收条件；
 - [ ] 能指出图像旋转、state 拼接、prompt、`replan_steps` 和 action queue 的源码位置并解释作用；
 - [ ] 能说明“每个 task 1 个 trial”不等于“整个 suite 只有 1 个 episode”；
 - [ ] 能用 `Ctrl+C` 停止运行，并说明 `docker compose ... down` 会清理什么、保留什么；
