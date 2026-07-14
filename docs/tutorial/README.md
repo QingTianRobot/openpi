@@ -1,6 +1,6 @@
 # openpi 零基础章节式教程
 
-> **先记住两条互不兼容的实践路线：**第 03 章的预训练演示使用 `pi05_libero`（π₀.₅）；第 08 章开始的教学 LoRA 使用后续创建的 `pi0_libero_tutorial`（π₀）。两者的模型结构、配置和 checkpoint 必须一一对应，**绝不能混用 checkpoint**。
+> **先记住两套 checkpoint 不可混用的模型配置：**第 03 章的预训练演示使用 `pi05_libero`（π₀.₅）；第 08 章开始的教学 LoRA 使用后续创建的 `pi0_libero_tutorial`（π₀）。两者的模型结构、配置和 checkpoint 必须一一对应，**绝不能混用 checkpoint**。
 
 [查看课程大纲](00_course_outline.md) · [立即开始：第 01 章](01_vla_and_robotics_basics.md)
 
@@ -24,8 +24,8 @@
 | 项目 | 课程假设 |
 | --- | --- |
 | 操作系统 | Ubuntu 22.04 |
-| 模型/训练主环境 | 仓库的 Python 3.11 `uv` 环境 |
-| 仿真环境 | Docker 中的 LIBERO 客户端与 MuJoCo |
+| 数据准备/训练环境 | Ubuntu 宿主机上的 Python 3.11 `uv` 环境 |
+| 推荐闭环评测环境 | Docker Compose 中的 `openpi_server` 与 LIBERO `runtime` 两个容器 |
 | GPU | 单卡 NVIDIA A100 或 H100 |
 | 磁盘 | 至少 100 GB 可用空间，用于模型、数据、镜像、缓存和 checkpoint |
 | 有效学习时间 | 16–24 小时，可跨多天完成 |
@@ -68,16 +68,16 @@ LIBERO observation → WebSocket client → Policy Server → LiberoInputs → n
 
 **可选阅读路径：**如果你暂时只想建立源码地图，不准备训练，可集中阅读第 01、04、05、06、11 章；`glossary.md` 和 `troubleshooting.md` 按需查阅。这条路径不要求修改模型核心实现，也不替代第 02、03 章的环境与闭环验收。
 
-## 双环境标签约定
+## 运行角色与环境标签约定
 
-后续命令默认从**仓库根目录**执行。需要多个终端时，每段命令都会带以下标签：
+后续命令默认从**仓库根目录**执行。“模型/训练端”和“LIBERO 仿真端”表示数据流中的逻辑角色，不保证始终对应宿主机或同一个容器。需要多个终端时，每段命令都会带以下标签并注明实际运行位置：
 
-| 标签 | 在哪里运行 | 负责什么 |
+| 标签 | 常见实际运行位置 | 负责什么 |
 | --- | --- | --- |
-| **模型/训练端** | Ubuntu 22.04 宿主机的 Python 3.11 `uv` 环境 | 数据处理、归一化统计、JAX/LoRA 训练、checkpoint 加载和 Policy Server |
-| **LIBERO 仿真端** | 项目提供的 Docker 环境 | LIBERO/MuJoCo 仿真、WebSocket client、episode 推进和评测记录 |
+| **模型/训练端** | 数据准备、归一化统计和 JAX/LoRA 训练在 Ubuntu 22.04 宿主机的 Python 3.11 `uv` 环境；第 03、10 章推荐的闭环评测中，checkpoint 加载和 Policy Server 运行在 Compose 的 `openpi_server` 容器 | 把 observation 变为模型输入，执行训练或推理，再返回 action chunk |
+| **LIBERO 仿真端** | 第 03、10 章推荐的闭环评测中运行在 Compose 的 `runtime` 容器 | 运行 LIBERO/MuJoCo、发送 observation、接收动作、推进 episode 并记录评测结果 |
 
-两端只通过 WebSocket 交换 observation 与 action。不要为了运行 LIBERO，把它的旧版依赖直接安装进模型/训练主环境。
+推荐的 Compose 评测会同时启动 `openpi_server` 和 `runtime`，两个容器使用 host network，并通过 WebSocket 交换 observation 与 action。不要为了运行 LIBERO，把它的旧版依赖直接安装进宿主机的 Python 3.11 `uv` 环境。
 
 ## 你将留下的学习产物
 
