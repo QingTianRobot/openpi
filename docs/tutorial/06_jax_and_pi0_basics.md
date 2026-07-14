@@ -413,10 +413,12 @@ rg -n -A 4 '^    def trainable_filter' src/openpi/training/config.py
 rg -n 'PathRegex|DiffState|params\.filter|tx\.init' \
   scripts/train.py src/openpi/shared/nnx_utils.py
 rg -n -A 36 '^    def compute_loss' src/openpi/models/pi0_fast.py
-rg -n -A 30 '^    def sample_actions' src/openpi/models/pi0_fast.py
+rg -n -A 20 '^        def step' src/openpi/models/pi0_fast.py
+rg -n -A 18 '# Decode one step' src/openpi/models/pi0_fast.py
+rg -n -B 8 -A 4 'jax\.lax\.while_loop' src/openpi/models/pi0_fast.py
 ```
 
-为当前配置写两行结论：freeze filter 命中什么、它的补集中哪些参数实际进入梯度/优化器。再写一句 FAST 对照：它的 loss 是 token cross-entropy，`sample_actions` 是自回归 token generation，不使用本章的 flow noise/time target。
+为当前配置写两行结论：freeze filter 命中什么、它的补集中哪些参数实际进入梯度/优化器。再用后三个搜索记录 FAST 的生成证据：`step` 从 `last_logit` 采样或取 argmax 并写入 `output_tokens`，采样出的 token 又被嵌入以计算下一步 `last_logit`，`jax.lax.while_loop` 则在 EOS 或最大步数处停止。最后写一句 FAST 对照：它的 loss 是 token cross-entropy，`sample_actions` 是这条自回归 token generation，不使用本章的 flow noise/time target。
 
 ## 预期结果
 
