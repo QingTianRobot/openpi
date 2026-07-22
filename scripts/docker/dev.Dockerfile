@@ -40,14 +40,22 @@ ENV UV_PROJECT_ENVIRONMENT=/.venv
 ENV PATH="/.venv/bin:${PATH}"
 ENV PYTHONPATH=/workspace/src:/workspace/packages/openpi-client/src
 
-RUN uv venv --python 3.11.9 "${UV_PROJECT_ENVIRONMENT}"
+ARG UV_HTTP_TIMEOUT=300
+ARG UV_PYTHON_INSTALL_MIRROR=https://github.com/indygreg/python-build-standalone/releases/download
+ARG OPENPI_UV_PYTHON_ATTEMPTS=3
+ARG OPENPI_UV_RETRY_DELAY_SECONDS=5
+COPY --chmod=0755 scripts/docker/create-venv.sh /usr/local/bin/openpi-create-venv
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT}" \
+    UV_PYTHON_INSTALL_MIRROR="${UV_PYTHON_INSTALL_MIRROR}" \
+    OPENPI_UV_PYTHON_ATTEMPTS="${OPENPI_UV_PYTHON_ATTEMPTS}" \
+    OPENPI_UV_RETRY_DELAY_SECONDS="${OPENPI_UV_RETRY_DELAY_SECONDS}" \
+    openpi-create-venv
 
 # Install locked third-party and development dependencies before copying source
 # so application changes do not invalidate this expensive layer.
 ARG UV_INDEX_URL=https://pypi.org/simple
-ARG UV_HTTP_TIMEOUT=300
 ARG OPENPI_UV_SYNC_ATTEMPTS=3
-ARG OPENPI_UV_RETRY_DELAY_SECONDS=5
 COPY --chmod=0755 scripts/docker/sync-dependencies.sh /usr/local/bin/openpi-sync-dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \

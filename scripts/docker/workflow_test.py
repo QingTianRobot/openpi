@@ -28,6 +28,9 @@ def _render_service(repo: Path, *compose_files: str) -> dict:
         "OPENPI_UBUNTU_SECURITY_MIRROR": "https://security-mirror.example/ubuntu",
         "OPENPI_UID": "1234",
         "OPENPI_UV_INDEX_URL": "https://python-mirror.example/simple",
+        "OPENPI_UV_PYTHON_ATTEMPTS": "4",
+        "OPENPI_UV_PYTHON_INSTALL_MIRROR": "https://python-download.example/releases/download",
+        "OPENPI_UV_HTTP_TIMEOUT": "420",
     }
     command = ["docker", "compose"]
     for compose_file in compose_files:
@@ -69,6 +72,11 @@ def test_base_compose_is_a_non_root_persistent_dev_service(repo: Path) -> None:
     assert service["build"]["args"]["UBUNTU_APT_MIRROR"] == "https://mirror.example/ubuntu"
     assert service["build"]["args"]["UBUNTU_SECURITY_MIRROR"] == "https://security-mirror.example/ubuntu"
     assert service["build"]["args"]["UV_INDEX_URL"] == "https://python-mirror.example/simple"
+    assert service["build"]["args"]["UV_HTTP_TIMEOUT"] == "420"
+    assert service["build"]["args"]["UV_PYTHON_INSTALL_MIRROR"] == (
+        "https://python-download.example/releases/download"
+    )
+    assert service["build"]["args"]["OPENPI_UV_PYTHON_ATTEMPTS"] == "4"
 
 
 def test_gpu_compose_selects_only_the_requested_gpu(repo: Path) -> None:
@@ -360,3 +368,49 @@ printf '%s\n' "$*" >> "$FAKE_UV_ARGS"
         "sync --frozen --no-install-project --dev",
     ]
     assert "uv sync failed (attempt 2/3); retrying" in result.stderr
+
+
+def test_python_venv_creation_retries_transient_download_failures(repo: Path, tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    count_path = tmp_path / "uv-count"
+    args_path = tmp_path / "uv-args"
+    uv_body = r'''
+count=0
+if [ -r "$FAKE_UV_COUNT" ]; then count="$(cat "$FAKE_UV_COUNT")"; fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$FAKE_UV_COUNT"
+printf '%s|timeout=%s|mirror=%s\n' \
+  "$*" "${UV_HTTP_TIMEOUT:-}" "${UV_PYTHON_INSTALL_MIRROR:-}" >> "$FAKE_UV_ARGS"
+[ "$count" -ge 3 ]
+'''
+    _write_fake_command(bin_dir / "uv", uv_body)
+    env = {
+        **os.environ,
+        "FAKE_UV_ARGS": str(args_path),
+        "FAKE_UV_COUNT": str(count_path),
+        "OPENPI_UV_PYTHON_ATTEMPTS": "3",
+        "OPENPI_UV_RETRY_DELAY_SECONDS": "0",
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "UV_HTTP_TIMEOUT": "420",
+        "UV_PROJECT_ENVIRONMENT": "/test-venv",
+        "UV_PYTHON_INSTALL_MIRROR": "https://python-download.example/releases/download",
+    }
+
+    result = subprocess.run(
+        ["sh", str(repo / "scripts/docker/create-venv.sh")],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert count_path.read_text().strip() == "3"
+    assert args_path.read_text().splitlines() == [
+        (
+            "venv --python 3.11.9 /test-venv|timeout=420|"
+            "mirror=https://python-download.example/releases/download"
+        )
+    ] * 3
+    assert "uv venv failed (attempt 2/3); retrying" in result.stderr

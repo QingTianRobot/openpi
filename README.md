@@ -96,9 +96,11 @@ proxyoff  # Optional after the build finishes.
 
 Proxy URLs containing credentials are intentionally rejected because build arguments must not carry secrets. The host
 proxy must accept connections from Docker through `host.docker.internal`; this matches the setup used by
-`~/env/LIBERO`. Transient `uv sync` or Git failures are retried three times. Change the retry policy only when needed:
+`~/env/LIBERO`. Both the Python 3.11 bootstrap download and dependency synchronization use a 300-second HTTP timeout
+and retry transient failures three times. Change the retry policy only when needed:
 
 ```bash
+export OPENPI_UV_PYTHON_ATTEMPTS=5
 export OPENPI_UV_SYNC_ATTEMPTS=5
 export OPENPI_UV_RETRY_DELAY_SECONDS=10
 ```
@@ -114,8 +116,10 @@ proxyon  # Still needed for Git dependencies such as huggingface/lerobot.
 opid-build
 ```
 
-APT and Python mirrors do not replace the pinned `lerobot` Git dependency. That repository is still fetched from GitHub,
-so use the proxy workflow when direct GitHub downloads produce `early EOF`, `GnuTLS recv error`, or `RPC failed`.
+`uv venv` obtains Python 3.11 from the `python-build-standalone` GitHub releases. If a compatible release mirror is
+available, select its `releases/download` base URL with `OPENPI_UV_PYTHON_INSTALL_MIRROR`; otherwise keep `proxyon`
+enabled for this step. The PyPI mirror also does not replace the pinned `lerobot` Git dependency. Use the proxy workflow
+when GitHub downloads produce `operation timed out`, `early EOF`, `GnuTLS recv error`, or `RPC failed`.
 
 In a second terminal, source the same file and enter the running container:
 
