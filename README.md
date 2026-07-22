@@ -62,19 +62,23 @@ override.
 Docker Engine, Docker Compose, and (for GPU use) NVIDIA Container Toolkit must already be installed. See
 [Docker Setup](docs/docker.md) for the supported host setup and the repository's example-specific Docker workflows.
 
-Load the host-side shortcuts from any directory, build the image once, and start either the base or GPU service as shown
-below.
-The first build downloads the pinned CUDA/cuDNN base image and the full locked Python environment, so it can take
-substantially longer than later cached builds.
-In BuildKit's non-interactive output, the `openpi-sync-dependencies` step can remain silent for several minutes while
-`uv` prepares LeRobot and the large CUDA/JAX/PyTorch packages. A successful run eventually prints `Prepared ...
-packages`; later builds reuse this cache. If the step instead prints `RPC failed`, `early EOF`, or a retry message, use
-the proxy setup below.
+#### Recommended quick start
 
-```bash
-source /path/to/openpi/functions.zsh
+The following sequence is recommended on hosts where GitHub or GHCR access is unstable. Run it from the repository
+root. The Aliyun and TUNA mirrors accelerate Ubuntu and PyPI packages, while `proxyon` covers the CUDA/uv images, the
+Python 3.11 standalone archive, and the pinned LeRobot Git dependency.
+
+```zsh
+source "$PWD/functions.zsh"
 opid-help
+
+export OPENPI_UBUNTU_APT_MIRROR=https://mirrors.aliyun.com/ubuntu
+export OPENPI_UBUNTU_SECURITY_MIRROR=https://mirrors.aliyun.com/ubuntu
+export OPENPI_UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+
+proxyon
 opid-build
+proxyoff
 
 # CPU-only development container:
 opid-up
@@ -84,53 +88,96 @@ export OPENPI_GPU_DEVICE=0
 opid-gpu-up
 ```
 
-If GitHub or GHCR connections are unstable, enable the host proxy before building. `opid-build` detects the standard
-proxy variables exported by the host `proxyon` helper, rewrites loopback addresses to `host.docker.internal`, and passes
-them only to the BuildKit steps that download dependencies:
+For a host with reliable direct access, the mirrors and proxy are optional:
 
-```bash
-proxyon
+```zsh
+source /path/to/openpi/functions.zsh
 opid-build
-proxyoff  # Optional after the build finishes.
+opid-up
 ```
 
-Proxy URLs containing credentials are intentionally rejected because build arguments must not carry secrets. The host
-proxy must accept connections from Docker through `host.docker.internal`; this matches the setup used by
-`~/env/LIBERO`. Both the Python 3.11 bootstrap download and dependency synchronization use a 300-second HTTP timeout
-and retry transient failures three times. Change the retry policy only when needed:
+The first build downloads the pinned CUDA/cuDNN base image and the full locked Python environment, so it can take much
+longer than later cached builds. BuildKit may remain silent for several minutes while `uv` downloads Python or prepares
+LeRobot and the large CUDA/JAX/PyTorch packages. Successful dependency preparation eventually prints `Prepared ...
+packages`; subsequent builds reuse the cache.
 
-```bash
+#### Proxy configuration
+
+`opid-build` detects the standard proxy variables exported by the host `proxyon` helper, rewrites `127.0.0.1` or
+`localhost` to `host.docker.internal`, and passes the proxy only to image build steps. A detected proxy produces this
+message before Docker starts:
+
+```text
+Using the current shell proxy for this Docker build.
+```
+
+If `proxyon` is unavailable, export the same variables manually. Adjust port `17891` when the host proxy uses another
+port:
+
+```zsh
+export http_proxy=http://127.0.0.1:17891
+export https_proxy=http://127.0.0.1:17891
+export all_proxy=socks5://127.0.0.1:17891
+opid-build
+unset http_proxy https_proxy all_proxy
+```
+
+The host proxy must accept connections from Docker through `host.docker.internal`; this matches the setup used by
+`~/env/LIBERO`. Proxy URLs containing credentials are rejected because build arguments must not carry secrets.
+
+Both the Python 3.11 bootstrap download and dependency synchronization use a 300-second HTTP timeout and retry transient
+failures three times. Slow networks can increase these values before running `opid-build`:
+
+```zsh
+export OPENPI_UV_HTTP_TIMEOUT=600
 export OPENPI_UV_PYTHON_ATTEMPTS=5
 export OPENPI_UV_SYNC_ATTEMPTS=5
 export OPENPI_UV_RETRY_DELAY_SECONDS=10
 ```
 
-The official Ubuntu and Python package indexes remain the defaults. The mirrors used by `~/env/LIBERO` can be selected
-explicitly on hosts where they are faster:
+#### Mirrors
 
-```bash
+Official Ubuntu, PyPI, and `python-build-standalone` sources remain the defaults. The Aliyun and TUNA mirrors used by
+`~/env/LIBERO` are optional and can be selected independently:
+
+```zsh
 export OPENPI_UBUNTU_APT_MIRROR=https://mirrors.aliyun.com/ubuntu
 export OPENPI_UBUNTU_SECURITY_MIRROR=https://mirrors.aliyun.com/ubuntu
 export OPENPI_UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
-proxyon  # Still needed for Git dependencies such as huggingface/lerobot.
-opid-build
 ```
 
 `uv venv` obtains Python 3.11 from the `python-build-standalone` GitHub releases. If a compatible release mirror is
-available, select its `releases/download` base URL with `OPENPI_UV_PYTHON_INSTALL_MIRROR`; otherwise keep `proxyon`
-enabled for this step. The PyPI mirror also does not replace the pinned `lerobot` Git dependency. Use the proxy workflow
-when GitHub downloads produce `operation timed out`, `early EOF`, `GnuTLS recv error`, or `RPC failed`.
+available, select its `releases/download` base URL before building:
+
+```zsh
+export OPENPI_UV_PYTHON_INSTALL_MIRROR=https://your-mirror.example/python-build-standalone/releases/download
+```
+
+The selected URL must be a credential-free HTTPS mirror with the same release layout. A PyPI mirror does not replace
+the Python standalone archive or the pinned LeRobot Git dependency; keep `proxyon` enabled when those GitHub downloads
+are not mirrored.
+
+#### Build troubleshooting
+
+| Build output | Cause | Action |
+| --- | --- | --- |
+| `uv venv --python 3.11.9` and `operation timed out` | The Python standalone archive could not be downloaded from GitHub. | Run `proxyon` before `opid-build`; optionally increase `OPENPI_UV_HTTP_TIMEOUT` and `OPENPI_UV_PYTHON_ATTEMPTS`, or configure `OPENPI_UV_PYTHON_INSTALL_MIRROR`. |
+| LeRobot `RPC failed`, `early EOF`, or `GnuTLS recv error` | The pinned Git commit download was interrupted. | Keep `proxyon` enabled and increase `OPENPI_UV_SYNC_ATTEMPTS` if needed. A PyPI mirror cannot serve this Git dependency. |
+| No output for several minutes at `openpi-create-venv` or `openpi-sync-dependencies` | BuildKit is waiting for or preparing large downloads. | Wait for a success line or an explicit retry/error; later builds reuse the cache. |
+| The build does not print `Using the current shell proxy...` | No supported HTTP/HTTPS proxy variable was detected. | Run `proxyon` again or export `http_proxy` and `https_proxy` manually before `opid-build`. |
+
+#### Running the container
 
 In a second terminal, source the same file and enter the running container:
 
-```bash
+```zsh
 source /path/to/openpi/functions.zsh
 opid-shell
 ```
 
 The container has a separate `opic-*` command namespace for project operations:
 
-```bash
+```zsh
 opic-help
 opic-test -q
 opic-python -c 'import jax; print(jax.devices())'
@@ -142,7 +189,7 @@ opic-serve --env LIBERO
 The policy server listens on container port 8000 and is published on host port 8000 by default. Set
 `OPENPI_POLICY_PORT` before starting the service to use another host port:
 
-```bash
+```zsh
 export OPENPI_POLICY_PORT=18000
 opid-gpu-up
 ```
@@ -160,7 +207,7 @@ openpi-docker-data/
 
 To use a different location, export it before sourcing `functions.zsh`:
 
-```bash
+```zsh
 export OPENPI_DOCKER_DATA_DIR=/mnt/openpi-docker-data
 source /path/to/openpi/functions.zsh
 ```
