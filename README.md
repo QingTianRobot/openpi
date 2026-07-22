@@ -51,10 +51,123 @@ GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
 
 NOTE: `GIT_LFS_SKIP_SMUDGE=1` is needed to pull LeRobot as a dependency.
 
-**Docker**: As an alternative to uv installation, we provide instructions for installing openpi using Docker. If you encounter issues with your system setup, consider using Docker to simplify installation. See [Docker Setup](docs/docker.md) for more details.
+### Docker development environment
 
+As an alternative to installing the Python environment on the host, the repository includes a Compose-based development
+container. It uses Python 3.11 and the locked `uv` dependencies, mounts the source tree at `/workspace`, runs as the host
+UID/GID, and keeps datasets, checkpoints, assets, W&B runs, and downloaded model caches across container recreation.
+The base configuration works without a GPU for development and lightweight checks; NVIDIA GPU access is an explicit
+override.
 
+Docker Engine, Docker Compose, and (for GPU use) NVIDIA Container Toolkit must already be installed. See
+[Docker Setup](docs/docker.md) for the supported host setup and the repository's example-specific Docker workflows.
 
+Load the host-side shortcuts from any directory, build the image once, and start either the base or GPU service as shown
+below.
+The first build downloads the pinned CUDA/cuDNN base image and the full locked Python environment, so it can take
+substantially longer than later cached builds.
+In BuildKit's non-interactive output, the `openpi-sync-dependencies` step can remain silent for several minutes while
+`uv` prepares LeRobot and the large CUDA/JAX/PyTorch packages. A successful run eventually prints `Prepared ...
+packages`; later builds reuse this cache. If the step instead prints `RPC failed`, `early EOF`, or a retry message, use
+the proxy setup below.
+
+```bash
+source /path/to/openpi/functions.zsh
+opid-help
+opid-build
+
+# CPU-only development container:
+opid-up
+
+# Or select one NVIDIA GPU (defaults to device 0):
+export OPENPI_GPU_DEVICE=0
+opid-gpu-up
+```
+
+If GitHub or GHCR connections are unstable, enable the host proxy before building. `opid-build` detects the standard
+proxy variables exported by the host `proxyon` helper, rewrites loopback addresses to `host.docker.internal`, and passes
+them only to the BuildKit steps that download dependencies:
+
+```bash
+proxyon
+opid-build
+proxyoff  # Optional after the build finishes.
+```
+
+Proxy URLs containing credentials are intentionally rejected because build arguments must not carry secrets. The host
+proxy must accept connections from Docker through `host.docker.internal`; this matches the setup used by
+`~/env/LIBERO`. Transient `uv sync` or Git failures are retried three times. Change the retry policy only when needed:
+
+```bash
+export OPENPI_UV_SYNC_ATTEMPTS=5
+export OPENPI_UV_RETRY_DELAY_SECONDS=10
+```
+
+The official Ubuntu and Python package indexes remain the defaults. The mirrors used by `~/env/LIBERO` can be selected
+explicitly on hosts where they are faster:
+
+```bash
+export OPENPI_UBUNTU_APT_MIRROR=https://mirrors.aliyun.com/ubuntu
+export OPENPI_UBUNTU_SECURITY_MIRROR=https://mirrors.aliyun.com/ubuntu
+export OPENPI_UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+proxyon  # Still needed for Git dependencies such as huggingface/lerobot.
+opid-build
+```
+
+APT and Python mirrors do not replace the pinned `lerobot` Git dependency. That repository is still fetched from GitHub,
+so use the proxy workflow when direct GitHub downloads produce `early EOF`, `GnuTLS recv error`, or `RPC failed`.
+
+In a second terminal, source the same file and enter the running container:
+
+```bash
+source /path/to/openpi/functions.zsh
+opid-shell
+```
+
+The container has a separate `opic-*` command namespace for project operations:
+
+```bash
+opic-help
+opic-test -q
+opic-python -c 'import jax; print(jax.devices())'
+opic-norm --config-name pi05_libero
+opic-train pi05_libero --exp-name=my_experiment --overwrite
+opic-serve --env LIBERO
+```
+
+The policy server listens on container port 8000 and is published on host port 8000 by default. Set
+`OPENPI_POLICY_PORT` before starting the service to use another host port:
+
+```bash
+export OPENPI_POLICY_PORT=18000
+opid-gpu-up
+```
+
+By default, persistent files live in an `openpi-docker-data` directory next to the repository:
+
+```text
+openpi-docker-data/
+├── assets/
+├── cache/
+├── checkpoints/
+├── data/
+└── wandb/
+```
+
+To use a different location, export it before sourcing `functions.zsh`:
+
+```bash
+export OPENPI_DOCKER_DATA_DIR=/mnt/openpi-docker-data
+source /path/to/openpi/functions.zsh
+```
+
+Useful lifecycle commands are `opid-ps`, `opid-logs`, and `opid-down`. `opid-down` removes the Compose container but
+does not remove the development image or any files under `OPENPI_DOCKER_DATA_DIR`. `opid-run` and `opid-gpu-run` open
+disposable shells when a persistent background service is unnecessary.
+
+The repository-level service intentionally does not expose X11, cameras, robot devices, or privileged mode. Continue to
+use the Compose files under `examples/libero`, `examples/aloha_sim`, and `examples/aloha_real` when those specialized
+runtime capabilities are required.
 
 ## Model Checkpoints
 

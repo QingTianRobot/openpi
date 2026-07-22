@@ -1,0 +1,9 @@
+services:
+  openpi:
+    gpus:
+      - driver: nvidia
+        device_ids:
+          - "${OPENPI_GPU_DEVICE:-0}"
+    shm_size: 2gb
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}

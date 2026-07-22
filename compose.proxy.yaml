@@ -1,0 +1,14 @@
+services:
+  openpi:
+    build:
+      extra_hosts:
+        - host.docker.internal=host-gateway
+      args:
+        HTTP_PROXY: ${OPENPI_BUILD_HTTP_PROXY:?set_OPENPI_BUILD_HTTP_PROXY}
+        HTTPS_PROXY: ${OPENPI_BUILD_HTTPS_PROXY:?set_OPENPI_BUILD_HTTPS_PROXY}
+        ALL_PROXY: ${OPENPI_BUILD_ALL_PROXY:-}
+        NO_PROXY: ${OPENPI_BUILD_NO_PROXY:-}
+        http_proxy: ${OPENPI_BUILD_HTTP_PROXY:?set_OPENPI_BUILD_HTTP_PROXY}
+        https_proxy: ${OPENPI_BUILD_HTTPS_PROXY:?set_OPENPI_BUILD_HTTPS_PROXY}
+        all_proxy: ${OPENPI_BUILD_ALL_PROXY:-}
+        no_proxy: ${OPENPI_BUILD_NO_PROXY:-}

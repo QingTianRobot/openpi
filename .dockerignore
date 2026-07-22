@@ -1,3 +1,8 @@
+.git
+.pytest_cache
 .venv
+**/__pycache__
+assets
 checkpoints
 data
+wandb
