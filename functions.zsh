@@ -23,6 +23,37 @@ _opid_prepare_host() {
   mkdir -p -- "${OPENPI_DOCKER_HOST_DIRS[@]}"
 }
 
+opid-download() {
+  emulate -L zsh
+  if (( $# < 1 || $# > 2 )); then
+    print -u2 "Usage: opid-download <checkpoint-name-or-uri> [--force]"
+    return 2
+  fi
+
+  local checkpoint="$1"
+  local force_download=false
+  if (( $# == 2 )); then
+    if [[ "$2" != "--force" ]]; then
+      print -u2 "Usage: opid-download <checkpoint-name-or-uri> [--force]"
+      return 2
+    fi
+    force_download=true
+  fi
+
+  local checkpoint_uri="${checkpoint}"
+  if [[ "${checkpoint}" != *://* ]]; then
+    checkpoint_uri="gs://openpi-assets/checkpoints/${checkpoint}"
+  fi
+
+  local python_code="from openpi.shared import download; import sys; print(download.maybe_download(sys.argv[1], force_download=sys.argv[2] == 'true'))"
+  (
+    cd "${OPENPI_REPO_DIR}" || return 1
+    _opid_prepare_host || return 1
+    docker compose -f "${OPENPI_BASE_COMPOSE_FILE}" run --rm -T "${OPENPI_COMPOSE_SERVICE}" \
+      uv run --no-sync python -c "${python_code}" "${checkpoint_uri}" "${force_download}"
+  )
+}
+
 _opid_has_build_proxy() {
   [[ -n "${OPENPI_BUILD_HTTP_PROXY:-${http_proxy:-${HTTP_PROXY:-}}}" ||
      -n "${OPENPI_BUILD_HTTPS_PROXY:-${https_proxy:-${HTTPS_PROXY:-}}}" ]]
@@ -219,6 +250,7 @@ opid-help() {
   print "  opid-gpu-up      Start with GPU OPENPI_GPU_DEVICE (default: 0)"
   print "  opid-run         Open a disposable CPU container shell"
   print "  opid-gpu-run     Open a disposable GPU container shell"
+  print "  opid-download <name-or-uri> [--force] Download and cache model weights"
   print "  opid-shell       Enter the single running development container"
   print "  opid-ps          Show container status"
   print "  opid-logs        Follow container logs"

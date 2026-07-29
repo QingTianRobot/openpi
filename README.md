@@ -247,6 +247,16 @@ We also provide "expert" checkpoints for various robot platforms and tasks. Thes
 
 By default, checkpoints are automatically downloaded from `gs://openpi-assets` and are cached in `~/.cache/openpi` when needed. You can overwrite the download path by setting the `OPENPI_DATA_HOME` environment variable.
 
+The Docker workflow can pre-download an official checkpoint by name into the persistent OpenPI cache without using a
+GPU. Pass a full URI to download from another supported remote filesystem, or add `--force` to refresh an existing
+cache entry:
+
+```zsh
+source "$PWD/functions.zsh"
+opid-download pi0_base
+opid-download gs://openpi-assets/checkpoints/pi05_libero --force
+```
+
 
 
 
