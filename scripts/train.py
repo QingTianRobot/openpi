@@ -1,6 +1,8 @@
+import csv
 import dataclasses
 import functools
 import logging
+import pathlib
 import platform
 from typing import Any
 
@@ -45,6 +47,62 @@ def init_logging():
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     logger.handlers[0].setFormatter(formatter)
+
+
+def _write_local_metrics(metrics_path: pathlib.Path, step: int, metrics: dict[str, float]) -> None:
+    fieldnames = ["step", "loss", "grad_norm", "param_norm", "learning_rate"]
+    write_header = not metrics_path.exists()
+    with metrics_path.open("a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerow({"step": step, **metrics})
+
+
+def _truncate_local_metrics(metrics_path: pathlib.Path, start_step: int) -> None:
+    if not metrics_path.exists():
+        return
+
+    with metrics_path.open(newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames
+        rows = [row for row in reader if int(row["step"]) < start_step]
+    if fieldnames is None:
+        raise ValueError(f"Metrics file has no header: {metrics_path}")
+
+    temporary_path = metrics_path.with_name(f".{metrics_path.name}.tmp")
+    with temporary_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    temporary_path.replace(metrics_path)
+    logging.info("Kept %d metric rows before resumed step %d", len(rows), start_step)
+
+
+def _write_training_curves(metrics_path: pathlib.Path) -> None:
+    import matplotlib as mpl
+
+    mpl.use("Agg")
+    import matplotlib.pyplot as plt
+
+    records = np.atleast_1d(np.genfromtxt(metrics_path, delimiter=",", names=True))
+    figure, axes = plt.subplots(2, 2, figsize=(11, 7), constrained_layout=True)
+    curves = (
+        ("loss", "Training loss"),
+        ("grad_norm", "Gradient norm"),
+        ("param_norm", "Parameter norm"),
+        ("learning_rate", "Learning rate"),
+    )
+    for axis, (key, title) in zip(axes.flat, curves, strict=True):
+        axis.plot(records["step"], records[key])
+        axis.set(title=title, xlabel="Step", ylabel=key)
+        axis.grid(alpha=0.3)
+
+    output_path = metrics_path.with_name("training_curves.png")
+    temporary_path = output_path.with_name(f".{output_path.name}.tmp")
+    figure.savefig(temporary_path, format="png", dpi=150)
+    plt.close(figure)
+    temporary_path.replace(output_path)
 
 
 def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = False, enabled: bool = True):
@@ -254,6 +312,12 @@ def main(config: _config.TrainConfig):
         total=config.num_train_steps,
         dynamic_ncols=True,
     )
+    learning_rate_schedule = config.lr_schedule.create()
+    metrics_path = config.checkpoint_dir / "metrics.csv"
+    if resuming:
+        _truncate_local_metrics(metrics_path, start_step)
+        if metrics_path.exists():
+            _write_training_curves(metrics_path)
 
     infos = []
     for step in pbar:
@@ -263,9 +327,13 @@ def main(config: _config.TrainConfig):
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
-            info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
-            pbar.write(f"Step {step}: {info_str}")
-            wandb.log(reduced_info, step=step)
+            local_metrics = {k: float(v) for k, v in reduced_info.items()}
+            local_metrics["learning_rate"] = float(learning_rate_schedule(step))
+            info_str = ", ".join(f"{k}={v:.6g}" for k, v in local_metrics.items())
+            logging.info(f"Step {step}: {info_str}")
+            wandb.log(local_metrics, step=step)
+            _write_local_metrics(metrics_path, step, local_metrics)
+            _write_training_curves(metrics_path)
             infos = []
         batch = next(data_iter)
 

@@ -84,9 +84,9 @@ _opid_prepare_proxy_url() {
 
 _opid_prepare_build_proxy() {
   emulate -L zsh
-  local raw_http="${OPENPI_BUILD_HTTP_PROXY:-${http_proxy:-${HTTP_PROXY:-}}}"
-  local raw_https="${OPENPI_BUILD_HTTPS_PROXY:-${https_proxy:-${HTTPS_PROXY:-}}}"
-  local raw_all="${OPENPI_BUILD_ALL_PROXY:-${all_proxy:-${ALL_PROXY:-}}}"
+  local raw_http="${OPENPI_BUILD_HTTP_PROXY:-${HTTP_PROXY:-${http_proxy:-}}}"
+  local raw_https="${OPENPI_BUILD_HTTPS_PROXY:-${HTTPS_PROXY:-${https_proxy:-}}}"
+  local raw_all="${OPENPI_BUILD_ALL_PROXY:-${ALL_PROXY:-${all_proxy:-}}}"
 
   [[ -n "${raw_http}" ]] || raw_http="${raw_https}"
   [[ -n "${raw_https}" ]] || raw_https="${raw_http}"
@@ -101,7 +101,7 @@ _opid_prepare_build_proxy() {
   else
     typeset -gx OPENPI_BUILD_ALL_PROXY=""
   fi
-  typeset -gx OPENPI_BUILD_NO_PROXY="${OPENPI_BUILD_NO_PROXY:-${no_proxy:-${NO_PROXY:-}}}"
+  typeset -gx OPENPI_BUILD_NO_PROXY="${OPENPI_BUILD_NO_PROXY:-${NO_PROXY:-${no_proxy:-}}}"
 }
 
 opid-build() {

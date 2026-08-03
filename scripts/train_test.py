@@ -11,6 +11,20 @@ from openpi.training import config as _config
 from . import train
 
 
+def test_truncate_local_metrics(tmp_path: pathlib.Path):
+    metrics_path = tmp_path / "metrics.csv"
+    for step in (0, 100, 200, 300):
+        train._write_local_metrics(  # noqa: SLF001
+            metrics_path,
+            step,
+            {"loss": 1.0, "grad_norm": 2.0, "param_norm": 3.0, "learning_rate": 4.0},
+        )
+
+    train._truncate_local_metrics(metrics_path, 201)  # noqa: SLF001
+
+    assert [line.split(",", 1)[0] for line in metrics_path.read_text().splitlines()] == ["step", "0", "100", "200"]
+
+
 @pytest.mark.parametrize("config_name", ["debug"])
 def test_train(tmp_path: pathlib.Path, config_name: str):
     config = dataclasses.replace(

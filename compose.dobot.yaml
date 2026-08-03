@@ -1,0 +1,7 @@
+services:
+  openpi:
+    volumes:
+      - type: bind
+        source: ${OPENPI_DOBOT_DATASET_DIR:?set_OPENPI_DOBOT_DATASET_DIR}
+        target: /datasets/lerobot_tape_pi05
+        read_only: true
