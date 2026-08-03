@@ -25,8 +25,8 @@ make policy-train
 
 该配置文件集中定义数据集路径、OpenPI config、实验名、训练步数和 resume/overwrite 行为；同一文件也保存
 ServoP 采集目录、任务文本、部署 checkpoint 和起始位，保证三段链路使用同一份配置。
-训练输出位于 `/home/ps/openpi-docker-data/checkpoints/<config>/<experiment>/`，文本日志位于
-`/home/ps/openpi-docker-data/wandb/<experiment>.log`；`metrics.csv` 和
+训练输出位于 `/home/ps/DZK_repos/openpi-docker-data/checkpoints/<config>/<experiment>/`，文本日志位于
+`/home/ps/DZK_repos/openpi-docker-data/wandb/<experiment>.log`；`metrics.csv` 和
 `training_curves.png` 会持续更新。完整数据验收、冻结规则和部署验收见本文第 15 节。
 
 ## 1. 训练目标
@@ -626,7 +626,7 @@ SigLIP vision encoder 和 PaliGemma language backbone 冻结，只训练 action 
 本次验收采用的 checkpoint 为 step `135000`：
 
 ```text
-/home/ps/openpi-docker-data/checkpoints/
+/home/ps/DZK_repos/openpi-docker-data/checkpoints/
   pi05_dobot_pen_box_servo_p_action_only/
   dobot_pen_box_servo_p_action_only_v1_long/135000
 ```
@@ -634,10 +634,10 @@ SigLIP vision encoder 和 PaliGemma language backbone 冻结，只训练 action 
 结构化指标、曲线和日志：
 
 ```text
-/home/ps/openpi-docker-data/checkpoints/pi05_dobot_pen_box_servo_p_action_only/
+/home/ps/DZK_repos/openpi-docker-data/checkpoints/pi05_dobot_pen_box_servo_p_action_only/
   dobot_pen_box_servo_p_action_only_v1_long/metrics.csv
   dobot_pen_box_servo_p_action_only_v1_long/training_curves.png
-/home/ps/openpi-docker-data/wandb/dobot_pen_box_servo_p_action_only_v1_long.log
+/home/ps/DZK_repos/openpi-docker-data/wandb/dobot_pen_box_servo_p_action_only_v1_long.log
 ```
 
 验收结果：checkpoint 的 `params`、`train_state` 和 `assets` 完整；loss/gradient norm 全程有限；
