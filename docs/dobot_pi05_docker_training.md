@@ -575,7 +575,7 @@ action 与物理状态的时间语义。42 个 accepted episode 的真实夹爪�
 本轮只使用新的 pen-box ServoP v2 数据，不混用 tape、MoveJog 或 ServoP v1 数据：
 
 ```text
-/home/ps/DZK_repos/dobot/dobot_nova2_ros2_driver/data_collection_servo_p_v2/lerobot_pi05_servo_p_v2
+/home/ps/DZK_repos/dobot/dobot_nova2_ros2_driver/data/collections/servo_p_v2/lerobot_pi05_servo_p_v2
 ```
 
 数据验收结果：LeRobot v3.0，108 个 accepted episode、23,047 帧、10 FPS；state 13 维、action
