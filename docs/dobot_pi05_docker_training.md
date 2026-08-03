@@ -2,6 +2,33 @@
 
 本文记录从 Docker 网络环境配置、镜像构建、LeRobot v3 数据接入，到 Dobot Nova2 的 π0.5 action-only 微调、指标记录和恢复训练的完整流程。后续训练状态和问题继续追加到文末的“运行记录”。
 
+## 当前有效训练（2026-08-03）
+
+这是当前用于 Dobot 真机部署的最新训练，不要按本文前面的 tape/MoveJog 历史实验启动：
+
+```text
+任务：pick the pen and put it in the box
+数据集：/home/ps/DZK_repos/dobot/dobot_nova2_ros2_driver/data/collections/servo_p_v2/lerobot_pi05_servo_p_v2
+配置：pi05_dobot_pen_box_servo_p_action_only
+实验：dobot_pen_box_servo_p_action_only_v1_long
+训练：1,000,000 steps（手动停止）
+部署 checkpoint：.../dobot_pen_box_servo_p_action_only_v1_long/135000
+```
+
+从 Dobot 仓库启动新训练时，编辑
+`/home/ps/DZK_repos/dobot/dobot_nova2_ros2_driver/config/pi05_pipeline.env`，然后执行：
+
+```bash
+cd /home/ps/DZK_repos/dobot/dobot_nova2_ros2_driver
+make policy-train
+```
+
+该配置文件集中定义数据集路径、OpenPI config、实验名、训练步数和 resume/overwrite 行为；同一文件也保存
+ServoP 采集目录、任务文本、部署 checkpoint 和起始位，保证三段链路使用同一份配置。
+训练输出位于 `/home/ps/openpi-docker-data/checkpoints/<config>/<experiment>/`，文本日志位于
+`/home/ps/openpi-docker-data/wandb/<experiment>.log`；`metrics.csv` 和
+`training_curves.png` 会持续更新。完整数据验收、冻结规则和部署验收见本文第 15 节。
+
 ## 1. 训练目标
 
 - 数据集：`/home/ps/DZK_repos/dobot/dobot_nova2_ros2_driver/data_collection/lerobot_tape_pi05`
