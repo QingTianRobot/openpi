@@ -151,6 +151,12 @@ def create_torch_dataset(
             data_config.dataset_root,
             action_horizon=action_horizon,
             load_images=load_images,
+            video_keys=data_config.video_keys,
+            episode_indices=data_config.episode_indices,
+            exclude_episode_indices=data_config.exclude_episode_indices,
+            action_padding=data_config.action_padding,
+            action_padding_hold_dims=data_config.action_padding_hold_dims,
+            prompt_override=data_config.prompt_override,
         )
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=data_config.dataset_root)
