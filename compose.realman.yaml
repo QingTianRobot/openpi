@@ -1,0 +1,10 @@
+# Mounts the RealMan LeRobot v3 dataset view read-only for training and norm-stats runs:
+#   export OPENPI_REALMAN_DATASET_DIR=/path/to/dataset
+#   docker compose -f compose.yaml -f compose.gpu.yaml -f compose.realman.yaml up -d openpi
+services:
+  openpi:
+    volumes:
+      - type: bind
+        source: ${OPENPI_REALMAN_DATASET_DIR:?set_OPENPI_REALMAN_DATASET_DIR}
+        target: /datasets/lerobot_realman
+        read_only: true

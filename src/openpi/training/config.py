@@ -1,7 +1,7 @@
 """See _CONFIGS for the list of available configs."""
 
 import abc
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import dataclasses
 import difflib
 import logging
@@ -21,6 +21,7 @@ import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.dobot_policy as dobot_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.realman_policy as realman_policy
 import openpi.shared.download as _download
 import openpi.shared.nnx_utils as nnx_utils
 import openpi.shared.normalize as _normalize
@@ -69,6 +70,20 @@ class DataConfig:
     repo_id: str | None = None
     # Optional local LeRobot dataset root. When set, no Hub download is attempted.
     dataset_root: str | None = None
+    # Local datasets only. Output camera key -> video key in the dataset. None keeps the loader default.
+    video_keys: Mapping[str, str] | None = None
+    # Local datasets only. If set, train on exactly these episodes; `exclude_episode_indices` are then removed
+    # (use it to hold out validation episodes).
+    episode_indices: Sequence[int] | None = None
+    exclude_episode_indices: Sequence[int] = ()
+    # Local datasets only. How action chunks that run past the end of an episode are filled:
+    # "repeat_last" or "zeros".
+    action_padding: str = "repeat_last"
+    # Local datasets only. Action dimensions that keep repeating the last value even when action_padding is "zeros".
+    action_padding_hold_dims: Sequence[int] = ()
+    # Local datasets only. If set, replaces the task text used as the prompt for every sample. The prompt used at
+    # inference time must be identical.
+    prompt_override: str | None = None
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
@@ -387,6 +402,70 @@ class LeRobotDobotDataConfig(DataConfigFactory):
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
             dataset_root=self.dataset_root,
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=ModelTransformFactory()(model_config),
+            action_sequence_keys=("action",),
+        )
+
+
+# Episodes held out of training so open-loop evaluation uses data the model has not seen: every 10th episode of the
+# 130 cleaned episodes. Change this together with the dataset.
+REALMAN_HOLDOUT_EPISODES = tuple(range(9, 130, 10))
+
+# Output camera key -> video key in the RealMan dataset: the global D435 and the right wrist Orbbec camera.
+REALMAN_VIDEO_KEYS = {
+    "observation.images.global": "observation.images.d435",
+    "observation.images.wrist": "observation.images.orbbec-right",
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotRealmanDataConfig(DataConfigFactory):
+    """Local LeRobot v3 data for one RealMan RM65 arm.
+
+    The dataset root must be a dataset view that carries `observation.state` (6 joints + gripper opening) and
+    `action` (6 normalized Cartesian velocities + gripper target) next to the original recording.
+    """
+
+    dataset_root: str = "/datasets/lerobot_realman"
+    # Train on exactly these episodes if set; `exclude_episode_indices` are removed afterwards.
+    episode_indices: Sequence[int] | None = None
+    exclude_episode_indices: Sequence[int] = REALMAN_HOLDOUT_EPISODES
+    # Past the end of an episode the velocity commands are zero (stop) while the gripper target keeps its last value.
+    action_padding: Literal["repeat_last", "zeros"] = "zeros"
+    action_padding_hold_dims: Sequence[int] = (6,)
+    # Replaces the dataset's task text as the prompt. The prompt sent at inference time must be identical.
+    prompt_override: str | None = None
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "state": "observation.state",
+                        "global_image": "observation.images.global",
+                        "wrist_image": "observation.images.wrist",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+        data_transforms = _transforms.Group(
+            inputs=[realman_policy.RealmanInputs(model_type=model_config.model_type)],
+            outputs=[realman_policy.RealmanOutputs()],
+        )
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            dataset_root=self.dataset_root,
+            video_keys=REALMAN_VIDEO_KEYS,
+            episode_indices=self.episode_indices,
+            exclude_episode_indices=self.exclude_episode_indices,
+            action_padding=self.action_padding,
+            action_padding_hold_dims=self.action_padding_hold_dims,
+            prompt_override=self.prompt_override,
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=ModelTransformFactory()(model_config),
@@ -888,6 +967,85 @@ _CONFIGS = [
         # A checkpoint is ~8.8 GiB. Keep one every 20k steps to stay within
         # the host's available disk while retaining frequent rolling saves.
         keep_period=20_000,
+        wandb_enabled=False,
+    ),
+    #
+    # RealMan RM65 (one arm) configs: see LeRobotRealmanDataConfig.
+    #
+    TrainConfig(
+        # Frozen SigLIP and PaliGemma language backbone; trains the action expert and the action/time projections.
+        # Fits a 32 GB GPU at batch 8 (measure the real peak with XLA_PYTHON_CLIENT_PREALLOCATE=false first).
+        name="pi05_realman_action_only",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=16),
+        data=LeRobotRealmanDataConfig(
+            repo_id="local/realman_right_arm",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        batch_size=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=nnx.Not(
+            nnx_utils.PathRegex(r".*(PaliGemma/llm/.*_1.*|action_in_proj|time_mlp_in|time_mlp_out|action_out_proj).*")
+        ),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        save_interval=1_000,
+        keep_period=10_000,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        # Full fine-tuning (every parameter). Needs far more memory than the action-only config: README says > 70 GB.
+        name="pi05_realman_full",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=16),
+        data=LeRobotRealmanDataConfig(
+            repo_id="local/realman_right_arm",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2.5e-5,
+            decay_steps=30_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        save_interval=2_000,
+        keep_period=10_000,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        # Pipeline sanity check: overfit two episodes with the full model. The loss should go to ~0 and the
+        # open-loop prediction on those episodes should match the recorded actions.
+        name="pi05_realman_full_overfit",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=16),
+        data=LeRobotRealmanDataConfig(
+            repo_id="local/realman_right_arm",
+            base_config=DataConfig(prompt_from_task=True),
+            episode_indices=(0, 1),
+            exclude_episode_indices=(),
+        ),
+        batch_size=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=100,
+            peak_lr=2.5e-5,
+            decay_steps=1_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=1_000,
+        save_interval=500,
+        keep_period=None,
         wandb_enabled=False,
     ),
     #
