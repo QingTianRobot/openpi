@@ -21,6 +21,7 @@ import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.dobot_policy as dobot_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.pika_rm65_policy as pika_rm65_policy
 import openpi.policies.realman_policy as realman_policy
 import openpi.shared.download as _download
 import openpi.shared.nnx_utils as nnx_utils
@@ -466,6 +467,43 @@ class LeRobotRealmanDataConfig(DataConfigFactory):
             action_padding=self.action_padding,
             action_padding_hold_dims=self.action_padding_hold_dims,
             prompt_override=self.prompt_override,
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=ModelTransformFactory()(model_config),
+            action_sequence_keys=("action",),
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotPikaRM65DataConfig(DataConfigFactory):
+    """Reconstructed Pika RM65 single-arm LeRobot mapping for serving `pi05_pika_rm65_train`.
+
+    This is inferred from the checkpoint assets and Pika recorder schema, not recovered
+    from the original training config. Absolute 7-D joint+gripper actions are assumed
+    because the saved norm stats match joint-angle magnitudes, not near-zero deltas.
+    """
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "state": "observation.state",
+                        "center_image": "observation.images.center",
+                        "left_image": "observation.images.left",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+        data_transforms = _transforms.Group(
+            inputs=[pika_rm65_policy.PikaRM65Inputs(model_type=model_config.model_type)],
+            outputs=[pika_rm65_policy.PikaRM65Outputs()],
+        )
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=ModelTransformFactory()(model_config),
@@ -967,6 +1005,23 @@ _CONFIGS = [
         # A checkpoint is ~8.8 GiB. Keep one every 20k steps to stay within
         # the host's available disk while retaining frequent rolling saves.
         keep_period=20_000,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        # Reconstructed so `opic-serve` can load
+        # checkpoints/pi05_pika_rm65_train/301000. The original TrainConfig was
+        # never committed here. Confirmed from the checkpoint: pi05, action_dim=32,
+        # asset_id local/pika_rm65_train. action_horizon=50 is the Pi0.5 default
+        # and may differ from training.
+        name="pi05_pika_rm65_train",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=50),
+        data=LeRobotPikaRM65DataConfig(
+            repo_id="local/pika_rm65_train",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        batch_size=8,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=301_000,
         wandb_enabled=False,
     ),
     #
