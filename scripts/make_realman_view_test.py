@@ -108,7 +108,7 @@ def test_state_and_action_for_the_right_arm():
     assert set(np.unique(action[:, 6])) <= {0.0, 1.0}
 
 
-def _make_recording(root, lengths=(100, 90, 80)):
+def _make_recording(root, lengths=(100, 90, 80), tasks=("old task name",) * 3):
     cameras = ("d435", "orbbec-right", "orbbec-left")
     (root / "meta" / "episodes" / "chunk-000").mkdir(parents=True)
     video_feature = {"dtype": "video", "shape": [fx.HEIGHT, fx.WIDTH, 3], "names": ["height", "width", "channels"]}
@@ -162,6 +162,7 @@ def _make_recording(root, lengths=(100, 90, 80)):
             "dataset_to_index": start + length,
             "meta/episodes/chunk_index": 0,
             "meta/episodes/file_index": episode,
+            "tasks": [tasks[episode]],
         }
         for camera in cameras:
             base = f"videos/observation.images.{camera}/"
@@ -250,3 +251,34 @@ def test_existing_destination_and_unknown_camera_are_rejected(built, tmp_path):
         mv.build_view(src, dst, mv.ViewParams())
     with pytest.raises(ValueError, match="camera"):
         mv.build_view(src, tmp_path / "other", mv.ViewParams(cameras=("d435", "nope")))
+
+
+def test_multi_task_view_maps_each_recording_task_to_its_prompt(tmp_path):
+    src = _make_recording(tmp_path / "recording", tasks=("pick_and_place", "pick_only", "pick_and_place"))
+    dst = tmp_path / "view"
+    pairs = (("pick_and_place", "place it"), ("pick_only", "pick it"))
+    contract = mv.build_view(src, dst, mv.ViewParams(task_prompts=pairs))
+
+    assert pq.read_table(dst / "meta" / "tasks.parquet").to_pylist() == [
+        {"task_index": 0, "task": "place it"},
+        {"task_index": 1, "task": "pick it"},
+    ]
+    assert json.loads((dst / "meta" / "info.json").read_text())["total_tasks"] == 2
+    for episode, (task_index, prompt) in enumerate([(0, "place it"), (1, "pick it"), (0, "place it")]):
+        data = pq.read_table(dst / "data" / "chunk-000" / f"file-{episode:03d}.parquet")
+        assert set(data["task_index"].to_pylist()) == {task_index}
+        row = pq.read_table(dst / "meta" / "episodes" / "chunk-000" / f"file-{episode:03d}.parquet").to_pylist()[0]
+        assert row["tasks"] == [prompt]
+    assert contract["prompts"] == {"pick_and_place": "place it", "pick_only": "pick it"}
+
+
+def test_multi_task_view_rejects_an_unmapped_task(tmp_path):
+    src = _make_recording(tmp_path / "recording", tasks=("pick_and_place", "pick_only", "pick_and_place"))
+    with pytest.raises(ValueError, match="no entry in task_prompts"):
+        mv.build_view(src, tmp_path / "view", mv.ViewParams(task_prompts=(("pick_and_place", "place it"),)))
+
+
+def test_task_prompt_without_equals_raises_value_error(tmp_path):
+    src = _make_recording(tmp_path / "recording")
+    with pytest.raises(ValueError, match="--task-prompt value must be"):
+        mv.main(mv.Args(src=src, dst=tmp_path / "view", task_prompt=("pick_only",)))
