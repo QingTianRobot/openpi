@@ -162,7 +162,7 @@ def test_one_batch_through_realman_config(dataset_root):
     np.testing.assert_allclose(np.asarray(actions)[..., 7:], 0.0)
 
 
-@pytest.mark.parametrize("name", ["pi05_realman_action_only", "pi05_realman_full", "pi05_realman_full_overfit"])
+@pytest.mark.parametrize("name", ["pi05_realman_action_only", "pi05_realman_full", "pi05_realman_full_overfit", "pi05_realman_multitask_action_only"])
 def test_realman_configs_parse_on_the_command_line(name, monkeypatch):
     """scripts/train.py builds its CLI from the registered configs; tuple defaults must be understood by tyro."""
     monkeypatch.setattr("sys.argv", ["train.py", name, "--exp-name", "x"])

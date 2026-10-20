@@ -276,3 +276,9 @@ def test_multi_task_view_rejects_an_unmapped_task(tmp_path):
     src = _make_recording(tmp_path / "recording", tasks=("pick_and_place", "pick_only", "pick_and_place"))
     with pytest.raises(ValueError, match="no entry in task_prompts"):
         mv.build_view(src, tmp_path / "view", mv.ViewParams(task_prompts=(("pick_and_place", "place it"),)))
+
+
+def test_task_prompt_without_equals_raises_value_error(tmp_path):
+    src = _make_recording(tmp_path / "recording")
+    with pytest.raises(ValueError, match="--task-prompt value must be"):
+        mv.main(mv.Args(src=src, dst=tmp_path / "view", task_prompt=("pick_only",)))

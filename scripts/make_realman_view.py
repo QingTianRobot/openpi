@@ -278,6 +278,12 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
     return contract
 
 
+def _parse_task_prompt(pair: str) -> tuple[str, str]:
+    if "=" not in pair:
+        raise ValueError(f"--task-prompt value must be 'task=prompt', got: {pair!r}")
+    return tuple(pair.split("=", 1))
+
+
 @dataclasses.dataclass
 class Args:
     src: pathlib.Path
@@ -298,7 +304,7 @@ def main(args: Args) -> None:
         linear_scale=args.linear_scale,
         angular_scale=args.angular_scale,
         command_latency_frames=args.command_latency_frames,
-        task_prompts=tuple(tuple(pair.split("=", 1)) for pair in args.task_prompt),
+        task_prompts=tuple(_parse_task_prompt(pair) for pair in args.task_prompt),
     )
     build_view(args.src.expanduser(), args.dst.expanduser(), params)
 
