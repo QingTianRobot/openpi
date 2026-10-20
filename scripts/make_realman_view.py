@@ -55,6 +55,8 @@ class ViewParams:
     smoothing_window: int = 5
     prompt: str = DEFAULT_PROMPT
     cameras: tuple[str, ...] = ("d435", "orbbec-right")
+    # Multi-task views: (recording task name, prompt) pairs. Empty means every episode gets `prompt`.
+    task_prompts: tuple[tuple[str, str], ...] = ()
 
 
 def gripper_open_fraction(raw: np.ndarray, open_raw: float, close_raw: float) -> np.ndarray:
@@ -156,9 +158,19 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
 
     for sub in ("meta/episodes/chunk-000", "data/chunk-000"):
         (dst / sub).mkdir(parents=True)
+    prompts = [p for _, p in params.task_prompts] or [params.prompt]
+    prompt_of_task = dict(params.task_prompts)
     all_states, all_actions, new_rows = [], [], []
     for row in episode_rows:
         episode, length = row["episode_index"], row["length"]
+        if params.task_prompts:
+            source_tasks = list(row["tasks"])
+            if len(source_tasks) != 1 or source_tasks[0] not in prompt_of_task:
+                raise ValueError(f"episode {episode}: task {source_tasks} has no entry in task_prompts")
+            prompt = prompt_of_task[source_tasks[0]]
+        else:
+            prompt = params.prompt
+        task_index = prompts.index(prompt)
         source_data = (
             src / "data" / f"chunk-{row['data/chunk_index']:03d}" / f"file-{row['data/file_index']:03d}.parquet"
         )
@@ -180,7 +192,7 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
                 {
                     "observation.state": _list_column(state),
                     "action": _list_column(action),
-                    "task_index": pa.array(np.zeros(length, dtype=np.int64)),
+                    "task_index": pa.array(np.full(length, task_index, dtype=np.int64)),
                     "episode_index": pa.array(np.full(length, episode, dtype=np.int64)),
                     "frame_index": pa.array(np.arange(length, dtype=np.int64)),
                     "index": pa.array(index),
@@ -206,7 +218,7 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
                 "meta/episodes/file_index",
             )
         }
-        new["tasks"] = [params.prompt]
+        new["tasks"] = [prompt]
         for camera in params.cameras:
             base = f"videos/observation.images.{camera}/"
             for field in ("chunk_index", "file_index", "from_timestamp", "to_timestamp"):
@@ -235,8 +247,12 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
         **{f"observation.images.{c}": info["features"][f"observation.images.{c}"] for c in params.cameras},
         **{k: info["features"][k] for k in ("timestamp", "frame_index", "episode_index", "index", "task_index")},
     }
-    (dst / "meta" / "info.json").write_text(json.dumps({**info, "features": features}, indent=4))
-    pq.write_table(pa.table({"task_index": [0], "task": [params.prompt]}), dst / "meta" / "tasks.parquet")
+    (dst / "meta" / "info.json").write_text(
+        json.dumps({**info, "features": features, "total_tasks": len(prompts)}, indent=4)
+    )
+    pq.write_table(
+        pa.table({"task_index": list(range(len(prompts))), "task": prompts}), dst / "meta" / "tasks.parquet"
+    )
     states, actions = np.concatenate(all_states), np.concatenate(all_actions)
     (dst / "meta" / "stats.json").write_text(
         json.dumps({"observation.state": _feature_stats(states), "action": _feature_stats(actions)}, indent=4)
@@ -249,7 +265,8 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
         "episodes": info["total_episodes"],
         "frames": info["total_frames"],
         "fps": fps,
-        "prompt": params.prompt,
+        "prompt": params.prompt if not params.task_prompts else None,
+        "prompts": dict(params.task_prompts) if params.task_prompts else {"*": params.prompt},
         "state": "6 joint positions (rad) + gripper open fraction (0 = closed, 1 = open)",
         "action": "6 Cartesian velocities / scale, clipped to [-1, 1] + gripper target (0 = close, 1 = open)",
         "params": dataclasses.asdict(params),
@@ -270,6 +287,8 @@ class Args:
     linear_scale: float = 0.25
     angular_scale: float = 0.6
     command_latency_frames: int = 5
+    # Repeatable "recording-task=prompt" pairs for a multi-task view, e.g. pick_only="pick up the power adapter".
+    task_prompt: tuple[str, ...] = ()
 
 
 def main(args: Args) -> None:
@@ -279,6 +298,7 @@ def main(args: Args) -> None:
         linear_scale=args.linear_scale,
         angular_scale=args.angular_scale,
         command_latency_frames=args.command_latency_frames,
+        task_prompts=tuple(tuple(pair.split("=", 1)) for pair in args.task_prompt),
     )
     build_view(args.src.expanduser(), args.dst.expanduser(), params)
 

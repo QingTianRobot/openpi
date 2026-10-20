@@ -414,6 +414,9 @@ class LeRobotDobotDataConfig(DataConfigFactory):
 # 130 cleaned episodes. Change this together with the dataset.
 REALMAN_HOLDOUT_EPISODES = tuple(range(9, 130, 10))
 
+# Multi-task view (2026-10-16): 114 pick_and_place (0..113) + 103 pick_only (114..216), every 10th held out.
+REALMAN_MULTITASK_HOLDOUT_EPISODES = tuple(range(9, 217, 10))
+
 # Output camera key -> video key in the RealMan dataset: the global D435 and the right wrist Orbbec camera.
 REALMAN_VIDEO_KEYS = {
     "observation.images.global": "observation.images.d435",
@@ -431,11 +434,11 @@ class LeRobotRealmanDataConfig(DataConfigFactory):
 
     dataset_root: str = "/datasets/lerobot_realman"
     # Train on exactly these episodes if set; `exclude_episode_indices` are removed afterwards.
-    episode_indices: Sequence[int] | None = None
-    exclude_episode_indices: Sequence[int] = REALMAN_HOLDOUT_EPISODES
+    episode_indices: tuple[int, ...] | None = None
+    exclude_episode_indices: tuple[int, ...] = REALMAN_HOLDOUT_EPISODES
     # Past the end of an episode the velocity commands are zero (stop) while the gripper target keeps its last value.
     action_padding: Literal["repeat_last", "zeros"] = "zeros"
-    action_padding_hold_dims: Sequence[int] = (6,)
+    action_padding_hold_dims: tuple[int, ...] = (6,)
     # Replaces the dataset's task text as the prompt. The prompt sent at inference time must be identical.
     prompt_override: str | None = None
 
@@ -1052,6 +1055,34 @@ _CONFIGS = [
         num_train_steps=30_000,
         save_interval=1_000,
         keep_period=10_000,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        # Same recipe as pi05_realman_action_only on the multi-task view; the prompt selects the task:
+        # "pick up the power adapter and put it in the blue bin" or "pick up the power adapter" (grasp and hold).
+        name="pi05_realman_multitask_action_only",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=16),
+        data=LeRobotRealmanDataConfig(
+            repo_id="local/realman_right_arm_multitask",
+            base_config=DataConfig(prompt_from_task=True),
+            exclude_episode_indices=REALMAN_MULTITASK_HOLDOUT_EPISODES,
+        ),
+        batch_size=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=nnx.Not(
+            nnx_utils.PathRegex(r".*(PaliGemma/llm/.*_1.*|action_in_proj|time_mlp_in|time_mlp_out|action_out_proj).*")
+        ),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        save_interval=1_000,
+        keep_period=5_000,
         wandb_enabled=False,
     ),
     TrainConfig(
