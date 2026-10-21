@@ -417,6 +417,11 @@ REALMAN_HOLDOUT_EPISODES = tuple(range(9, 130, 10))
 # Multi-task view (2026-10-16): 114 pick_and_place (0..113) + 103 pick_only (114..216), every 10th held out.
 REALMAN_MULTITASK_HOLDOUT_EPISODES = tuple(range(9, 217, 10))
 
+# Multi-task view v2 (2026-10-21): the v1 view (0..216, identical frames) + 111 pick_only_light-weak_1021 (217..327,
+# pick-only under weak light, prompt "pick up the power adapter"). Every 10th held out: 9..209 are v1's holdout, so
+# a run continued from the v1 model never saw any of them.
+REALMAN_MULTITASK_V2_HOLDOUT_EPISODES = tuple(range(9, 328, 10))
+
 # Output camera key -> video key in the RealMan dataset: the global D435 and the right wrist Orbbec camera.
 REALMAN_VIDEO_KEYS = {
     "observation.images.global": "observation.images.d435",
@@ -1083,6 +1088,37 @@ _CONFIGS = [
         num_train_steps=30_000,
         save_interval=1_000,
         keep_period=5_000,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        # Continued training (2026-10-21): starts from the v1 multitask model (m_multitask_b16_2gpu/29999) on the v2
+        # view. Half the v1 peak LR and a short cosine over 15k steps (~2 epochs of v2 at batch 16): v1 had already
+        # converged on 0..216, the new weak-light episodes are ~27 % of the frames.
+        name="pi05_realman_multitask_v2_action_only",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=16),
+        data=LeRobotRealmanDataConfig(
+            repo_id="local/realman_right_arm_multitask_v2",
+            base_config=DataConfig(prompt_from_task=True),
+            exclude_episode_indices=REALMAN_MULTITASK_V2_HOLDOUT_EPISODES,
+        ),
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=2.5e-5,
+            decay_steps=15_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=nnx.Not(
+            nnx_utils.PathRegex(r".*(PaliGemma/llm/.*_1.*|action_in_proj|time_mlp_in|time_mlp_out|action_out_proj).*")
+        ),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "./checkpoints/pi05_realman_multitask_action_only/m_multitask_b16_2gpu/29999/params"
+        ),
+        num_train_steps=15_000,
+        save_interval=1_000,
+        keep_period=2_500,
         wandb_enabled=False,
     ),
     TrainConfig(
