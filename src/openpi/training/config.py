@@ -1092,8 +1092,8 @@ _CONFIGS = [
     ),
     TrainConfig(
         # Continued training (2026-10-21): starts from the v1 multitask model (m_multitask_b16_2gpu/29999) on the v2
-        # view. Half the v1 peak LR and a short cosine over 15k steps (~2 epochs of v2 at batch 16): v1 had already
-        # converged on 0..216, the new weak-light episodes are ~27 % of the frames.
+        # view. Half the v1 peak LR, cosine over 100k steps (~13 epochs of v2 at batch 16); every 10k is kept so the
+        # serving checkpoint is picked by held-out eval (overfitting shows up there, not in the train loss).
         name="pi05_realman_multitask_v2_action_only",
         model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=16),
         data=LeRobotRealmanDataConfig(
@@ -1103,9 +1103,9 @@ _CONFIGS = [
         ),
         batch_size=16,
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=500,
+            warmup_steps=1_000,
             peak_lr=2.5e-5,
-            decay_steps=15_000,
+            decay_steps=100_000,
             decay_lr=2.5e-6,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
@@ -1116,9 +1116,9 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "./checkpoints/pi05_realman_multitask_action_only/m_multitask_b16_2gpu/29999/params"
         ),
-        num_train_steps=15_000,
+        num_train_steps=100_000,
         save_interval=1_000,
-        keep_period=2_500,
+        keep_period=10_000,
         wandb_enabled=False,
     ),
     TrainConfig(
