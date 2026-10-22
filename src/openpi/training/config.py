@@ -422,6 +422,11 @@ REALMAN_MULTITASK_HOLDOUT_EPISODES = tuple(range(9, 217, 10))
 # a run continued from the v1 model never saw any of them.
 REALMAN_MULTITASK_V2_HOLDOUT_EPISODES = tuple(range(9, 328, 10))
 
+# Pick-only view v2 (2026-10-22): the pick-only episodes of the multitask v2 clean set, without pick_and_place:
+# 103 pick_only (0..102, normal light, 10-16) + 111 pick_only_light-weak_1021 (103..213, weak light, 10-21), all with
+# the prompt "pick up the power adapter". Every 10th held out.
+REALMAN_PICK_V2_HOLDOUT_EPISODES = tuple(range(9, 214, 10))
+
 # Output camera key -> video key in the RealMan dataset: the global D435 and the right wrist Orbbec camera.
 REALMAN_VIDEO_KEYS = {
     "observation.images.global": "observation.images.d435",
@@ -1119,6 +1124,36 @@ _CONFIGS = [
         num_train_steps=100_000,
         save_interval=1_000,
         keep_period=10_000,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        # Pick-only model (2026-10-22) for the pick-and-clear tree: the multitask model under the pick prompt sometimes
+        # carried on into the place motion (prompt swap moved its loss only 10-15%), so this one never sees
+        # pick_and_place. Fresh from pi05_base with the v1 multitask recipe (peak 5e-5, cosine 30k); every 5k kept so
+        # the serving checkpoint is picked by held-out eval.
+        name="pi05_realman_pick_v2_action_only",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=16),
+        data=LeRobotRealmanDataConfig(
+            repo_id="local/realman_right_arm_pick_v2",
+            base_config=DataConfig(prompt_from_task=True),
+            exclude_episode_indices=REALMAN_PICK_V2_HOLDOUT_EPISODES,
+        ),
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=nnx.Not(
+            nnx_utils.PathRegex(r".*(PaliGemma/llm/.*_1.*|action_in_proj|time_mlp_in|time_mlp_out|action_out_proj).*")
+        ),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        save_interval=1_000,
+        keep_period=5_000,
         wandb_enabled=False,
     ),
     TrainConfig(
