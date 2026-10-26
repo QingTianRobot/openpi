@@ -38,6 +38,19 @@ def test_target_flips_where_the_gripper_starts_to_move():
     assert (target[91:] == 1).all()
 
 
+def test_wide_grasp_needs_a_lower_closed_threshold():
+    # A wide grasp of the adapter body stalls at ~3900, below the default halfway threshold (4275).
+    raw = np.full(120, 50.0)
+    raw[20:60] = np.linspace(50, 3900, 40)
+    raw[60:] = 3900
+
+    assert (mv.derive_gripper_target(raw, NO_LATENCY) == 1).all()
+    target = mv.derive_gripper_target(raw, mv.ViewParams(command_latency_frames=0, closed_threshold_raw=3200.0))
+    # The slope is ~99 per frame, so the reading first leaves the open level by the 100 margin at frame 22.
+    assert (target[:22] == 1).all()
+    assert (target[22:] == 0).all()
+
+
 def test_command_latency_moves_the_flips_earlier():
     target = mv.derive_gripper_target(_close_then_open_curve(), mv.ViewParams(command_latency_frames=5))
 
@@ -282,3 +295,10 @@ def test_task_prompt_without_equals_raises_value_error(tmp_path):
     src = _make_recording(tmp_path / "recording")
     with pytest.raises(ValueError, match="--task-prompt value must be"):
         mv.main(mv.Args(src=src, dst=tmp_path / "view", task_prompt=("pick_only",)))
+
+
+def test_closed_threshold_reaches_the_view_params(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(mv, "build_view", lambda src, dst, params: seen.setdefault("params", params))
+    mv.main(mv.Args(src=tmp_path / "src", dst=tmp_path / "view", closed_threshold_raw=3200.0))
+    assert seen["params"].closed_threshold_raw == 3200.0

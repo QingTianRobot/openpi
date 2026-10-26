@@ -293,6 +293,9 @@ class Args:
     linear_scale: float = 0.25
     angular_scale: float = 0.6
     command_latency_frames: int = 5
+    # Gripper readings above this count as closed; None = halfway between open and closed. Lower it when some grasps
+    # stall below halfway (a wide grasp of the adapter body holds at ~3600-4300 instead of ~5700).
+    closed_threshold_raw: float | None = None
     # Repeatable "recording-task=prompt" pairs for a multi-task view, e.g. pick_only="pick up the power adapter".
     task_prompt: tuple[str, ...] = ()
 
@@ -304,6 +307,7 @@ def main(args: Args) -> None:
         linear_scale=args.linear_scale,
         angular_scale=args.angular_scale,
         command_latency_frames=args.command_latency_frames,
+        closed_threshold_raw=args.closed_threshold_raw,
         task_prompts=tuple(_parse_task_prompt(pair) for pair in args.task_prompt),
     )
     build_view(args.src.expanduser(), args.dst.expanduser(), params)
