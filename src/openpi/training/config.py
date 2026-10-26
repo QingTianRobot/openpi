@@ -427,6 +427,13 @@ REALMAN_MULTITASK_V2_HOLDOUT_EPISODES = tuple(range(9, 328, 10))
 # the prompt "pick up the power adapter". Every 10th held out.
 REALMAN_PICK_V2_HOLDOUT_EPISODES = tuple(range(9, 214, 10))
 
+# Pick-only view v3 (2026-10-26): the v2 view (0..213; state and velocities identical, gripper labels identical except
+# 75/139/148, whose two-stage closes now flip at the first stage) + 118 new 10-26 episodes (214..331: 88 pick_only in
+# normal light, 30 pick_only_light-weak_1021 in weak light), built with closed_threshold_raw 3200 because 17 of the new
+# grasps hold the adapter body at ~3600-4300. Every 10th held out: 9..209 are v2's holdout, so a run continued from
+# the v2 model never saw any of them.
+REALMAN_PICK_V3_HOLDOUT_EPISODES = tuple(range(9, 332, 10))
+
 # Output camera key -> video key in the RealMan dataset: the global D435 and the right wrist Orbbec camera.
 REALMAN_VIDEO_KEYS = {
     "observation.images.global": "observation.images.d435",
@@ -1151,6 +1158,38 @@ _CONFIGS = [
         ),
         ema_decay=None,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        save_interval=1_000,
+        keep_period=5_000,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        # Continued training (2026-10-26): starts from the v2 pick model (p2_30k_b16_2gpu/29999, served since 10-23) on
+        # the v3 view. Half the v2 peak LR, cosine over 30k steps (~4.8 epochs of v3 at batch 16); every 5k is kept so
+        # the serving checkpoint is picked by held-out eval. Uses v2's norm stats (the initial weights were learned
+        # with them).
+        name="pi05_realman_pick_v3_action_only",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=16),
+        data=LeRobotRealmanDataConfig(
+            repo_id="local/realman_right_arm_pick_v3",
+            base_config=DataConfig(prompt_from_task=True),
+            exclude_episode_indices=REALMAN_PICK_V3_HOLDOUT_EPISODES,
+        ),
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2.5e-5,
+            decay_steps=30_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=nnx.Not(
+            nnx_utils.PathRegex(r".*(PaliGemma/llm/.*_1.*|action_in_proj|time_mlp_in|time_mlp_out|action_out_proj).*")
+        ),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "./checkpoints/pi05_realman_pick_v2_action_only/p2_30k_b16_2gpu/29999/params"
+        ),
         num_train_steps=30_000,
         save_interval=1_000,
         keep_period=5_000,
