@@ -49,6 +49,11 @@ class ViewParams:
     # Readings above this count as closed. None means halfway between open and closed. A gripper that closes on an
     # object stalls well below `gripper_close_raw` (about 5700 here), so do not set this close to it.
     closed_threshold_raw: float | None = None
+    # A wide grasp holds the adapter across its body at ~3600-4300, below halfway. An episode whose (smoothed)
+    # readings never pass wide_grasp_max_raw is judged at wide_grasp_threshold_raw; every other episode keeps the
+    # closed threshold, which a regrasp (reopens to ~3650) or a release cut off by the recording needs. None = off.
+    wide_grasp_threshold_raw: float | None = None
+    wide_grasp_max_raw: float | None = None
     # How many frames before the gripper starts to move the target flips. Not measured: 5 frames is 0.17 s.
     command_latency_frames: int = 5
     # Median filter window that removes single-frame reading glitches before events are located.
@@ -82,6 +87,13 @@ def derive_gripper_target(
         if params.closed_threshold_raw is None
         else params.closed_threshold_raw
     )
+    if (
+        params.wide_grasp_threshold_raw is not None
+        and params.wide_grasp_max_raw is not None
+        and len(smooth)
+        and smooth.max() <= params.wide_grasp_max_raw
+    ):
+        threshold = params.wide_grasp_threshold_raw
     closed = smooth > threshold
     commanded_closed = np.full(len(smooth), closed[0])
     previous_crossing = 0
@@ -296,6 +308,9 @@ class Args:
     # Gripper readings above this count as closed; None = halfway between open and closed. Lower it when some grasps
     # stall below halfway (a wide grasp of the adapter body holds at ~3600-4300 instead of ~5700).
     closed_threshold_raw: float | None = None
+    # Wide grasps (see ViewParams): an episode never above --wide-grasp-max-raw is judged at --wide-grasp-threshold-raw.
+    wide_grasp_threshold_raw: float | None = None
+    wide_grasp_max_raw: float | None = None
     # Repeatable "recording-task=prompt" pairs for a multi-task view, e.g. pick_only="pick up the power adapter".
     task_prompt: tuple[str, ...] = ()
 
@@ -308,6 +323,8 @@ def main(args: Args) -> None:
         angular_scale=args.angular_scale,
         command_latency_frames=args.command_latency_frames,
         closed_threshold_raw=args.closed_threshold_raw,
+        wide_grasp_threshold_raw=args.wide_grasp_threshold_raw,
+        wide_grasp_max_raw=args.wide_grasp_max_raw,
         task_prompts=tuple(_parse_task_prompt(pair) for pair in args.task_prompt),
     )
     build_view(args.src.expanduser(), args.dst.expanduser(), params)

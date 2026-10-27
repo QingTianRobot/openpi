@@ -51,6 +51,40 @@ def test_wide_grasp_needs_a_lower_closed_threshold():
     assert (target[22:] == 0).all()
 
 
+WIDE = mv.ViewParams(command_latency_frames=0, wide_grasp_threshold_raw=3200.0, wide_grasp_max_raw=4575.0)
+
+
+def test_a_wide_grasp_is_judged_at_the_wide_grasp_threshold():
+    raw = np.full(120, 50.0)
+    raw[20:60] = np.linspace(50, 3900, 40)
+    raw[60:] = 3900
+    target = mv.derive_gripper_target(raw, WIDE)
+    assert (target[:22] == 1).all()
+    assert (target[22:] == 0).all()
+
+
+def test_a_hold_just_above_halfway_does_not_flicker():
+    # 2026-10-26 raw #462 held at 4262-4279.
+    raw = np.concatenate([np.full(60, 50.0), np.tile(np.repeat([4279.0, 4262.0], 20), 3)])
+    target = mv.derive_gripper_target(raw, WIDE)
+    assert set(target[:59]) == {1.0} and set(target[61:]) == {0.0}
+
+
+def test_a_release_cut_off_by_the_recording_still_opens():
+    # raw #39/#83/#119: the recording ends while the gripper opens (last readings ~3700).
+    raw = np.concatenate([np.full(60, 50.0), np.full(100, 7900.0), np.linspace(7900, 3700, 8)])
+    target = mv.derive_gripper_target(raw, WIDE)
+    assert target[0] == 1 and target[100] == 0 and target[-1] == 1
+
+
+def test_a_partial_reopen_of_a_normal_grasp_is_a_second_close():
+    # raw #130: closed to 6682, reopened to ~3650, closed again.
+    raw = np.concatenate([np.full(60, 50.0), np.full(60, 6682.0), np.full(30, 3650.0), np.full(60, 5748.0)])
+    target = mv.derive_gripper_target(raw, WIDE)
+    flips = np.flatnonzero(np.diff(target) != 0)
+    assert len(flips) == 3
+
+
 def test_command_latency_moves_the_flips_earlier():
     target = mv.derive_gripper_target(_close_then_open_curve(), mv.ViewParams(command_latency_frames=5))
 
@@ -300,5 +334,13 @@ def test_task_prompt_without_equals_raises_value_error(tmp_path):
 def test_closed_threshold_reaches_the_view_params(tmp_path, monkeypatch):
     seen = {}
     monkeypatch.setattr(mv, "build_view", lambda src, dst, params: seen.setdefault("params", params))
-    mv.main(mv.Args(src=tmp_path / "src", dst=tmp_path / "view", closed_threshold_raw=3200.0))
-    assert seen["params"].closed_threshold_raw == 3200.0
+    mv.main(
+        mv.Args(
+            src=tmp_path / "src", dst=tmp_path / "view", closed_threshold_raw=4275.0,
+            wide_grasp_threshold_raw=3200.0, wide_grasp_max_raw=4575.0,
+        )
+    )
+    params = seen["params"]
+    assert (params.closed_threshold_raw, params.wide_grasp_threshold_raw, params.wide_grasp_max_raw) == (
+        4275.0, 3200.0, 4575.0,
+    )
