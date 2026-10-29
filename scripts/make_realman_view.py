@@ -175,7 +175,9 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
     for sub in ("meta/episodes/chunk-000", "data/chunk-000"):
         (dst / sub).mkdir(parents=True)
     prompts = [p for _, p in params.task_prompts] or [params.prompt]
-    prompts += [p for _, p in params.material_prompts if p not in prompts]
+    for _, prompt in params.material_prompts:
+        if prompt not in prompts:
+            prompts.append(prompt)
     prompt_of_task = dict(params.task_prompts)
     prompt_of_material = dict(params.material_prompts)
     material_of_episode = _episode_materials(src, episode_rows) if params.material_prompts else {}

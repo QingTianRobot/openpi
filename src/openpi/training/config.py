@@ -434,11 +434,13 @@ REALMAN_PICK_V2_HOLDOUT_EPISODES = tuple(range(9, 214, 10))
 # the v2 model never saw any of them.
 REALMAN_PICK_V3_HOLDOUT_EPISODES = tuple(range(9, 332, 10))
 
-# Pick-only view v4 (2026-10-29): the v3 view (0..331; state and velocities identical, gripper labels identical except
-# 75/139/148/252, now judged by the per-episode wide-grasp rule) + 94 new 10-29 episodes (332..425) picking small
-# white plugs, prompt "pick up the plug" (chosen by the material tag; the recording task is still pick_only). Every
-# 10th held out: 9..329 are v3's holdout, so a run continued from the v3 model never saw any of them.
-REALMAN_PICK_V4_HOLDOUT_EPISODES = tuple(range(9, 426, 10))
+# Pick-only view v5 (2026-10-29): the v3 view (0..331; state and velocities identical, gripper labels identical except
+# 75/139/148/252, now judged by the per-episode wide-grasp rule) + 94 10-29 episodes picking small white plugs
+# (332..425, prompt "pick up the plug") + 99 10-29 episodes picking cables (426..524: 43 cable alone, 56 cable from a
+# mixed pile, prompt "pick up the cable"; 8 regrasps left out). Prompts come from the material tag; the recording
+# task is still pick_only. Every 10th held out: 9..329 are v3's holdout, so a run continued from the v3 model never
+# saw any of them.
+REALMAN_PICK_V5_HOLDOUT_EPISODES = tuple(range(9, 525, 10))
 
 # Output camera key -> video key in the RealMan dataset: the global D435 and the right wrist Orbbec camera.
 REALMAN_VIDEO_KEYS = {
@@ -1203,15 +1205,15 @@ _CONFIGS = [
     ),
     TrainConfig(
         # Continued training (2026-10-29): starts from the v3 pick model (p3_30k_b16_1gpu/29999, served since 10-27) on
-        # the v4 view (adapters + plugs, one prompt per material). Same schedule as v3 (~3.7 epochs of v4 at batch 16);
+        # the v5 view (adapters, plugs, cables; one prompt per material). Same schedule as v3 (~3.0 epochs of v5 at batch 16);
         # every 5k is kept so the serving checkpoint is picked by held-out eval. Uses v3's norm stats (= v2's; the
         # initial weights were learned with them).
-        name="pi05_realman_pick_v4_action_only",
+        name="pi05_realman_pick_v5_action_only",
         model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=16),
         data=LeRobotRealmanDataConfig(
-            repo_id="local/realman_right_arm_pick_v4",
+            repo_id="local/realman_right_arm_pick_v5",
             base_config=DataConfig(prompt_from_task=True),
-            exclude_episode_indices=REALMAN_PICK_V4_HOLDOUT_EPISODES,
+            exclude_episode_indices=REALMAN_PICK_V5_HOLDOUT_EPISODES,
         ),
         batch_size=16,
         lr_schedule=_optimizer.CosineDecaySchedule(

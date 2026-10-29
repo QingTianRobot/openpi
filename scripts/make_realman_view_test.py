@@ -337,7 +337,7 @@ def test_material_prompt_overrides_the_task_prompt_of_tagged_episodes(tmp_path):
     src = _make_recording(tmp_path / "recording", tasks=("pick_only",) * 3)
     _write_episode_tags(src, ("adapter", "plug", None))
     params = mv.ViewParams(task_prompts=(("pick_only", "pick up the power adapter"),),
-                           material_prompts=(("plug", "pick up the plug"),))
+                           material_prompts=(("plug", "pick up the plug"), ("cable", "pick up the plug")))
     contract = mv.build_view(src, tmp_path / "view", params)
 
     assert pq.read_table(tmp_path / "view" / "meta" / "tasks.parquet").to_pylist() == [
@@ -351,7 +351,7 @@ def test_material_prompt_overrides_the_task_prompt_of_tagged_episodes(tmp_path):
         assert set(data["task_index"].to_pylist()) == {task_index}
         meta = tmp_path / "view" / "meta" / "episodes" / "chunk-000" / f"file-{episode:03d}.parquet"
         assert pq.read_table(meta).to_pylist()[0]["tasks"] == [prompt]
-    assert contract["material_prompts"] == {"plug": "pick up the plug"}
+    assert contract["material_prompts"] == {"plug": "pick up the plug", "cable": "pick up the plug"}
     assert contract["materials"] == {"adapter": 1, "plug": 1, "None": 1}
 
 
