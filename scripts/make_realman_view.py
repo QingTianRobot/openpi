@@ -20,6 +20,7 @@ Example:
         --dst ~/data/realman/realman_right_arm_view
 """
 
+import collections
 import dataclasses
 import datetime
 import json
@@ -62,6 +63,9 @@ class ViewParams:
     cameras: tuple[str, ...] = ("d435", "orbbec-right")
     # Multi-task views: (recording task name, prompt) pairs. Empty means every episode gets `prompt`.
     task_prompts: tuple[tuple[str, str], ...] = ()
+    # (material tag, prompt) pairs read from <src>/episode_tags.json; they win over task_prompts, so one recording
+    # task (pick_only) can carry a prompt per object. Episodes without a listed material keep their task prompt.
+    material_prompts: tuple[tuple[str, str], ...] = ()
 
 
 def gripper_open_fraction(raw: np.ndarray, open_raw: float, close_raw: float) -> np.ndarray:
@@ -171,11 +175,16 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
     for sub in ("meta/episodes/chunk-000", "data/chunk-000"):
         (dst / sub).mkdir(parents=True)
     prompts = [p for _, p in params.task_prompts] or [params.prompt]
+    prompts += [p for _, p in params.material_prompts if p not in prompts]
     prompt_of_task = dict(params.task_prompts)
+    prompt_of_material = dict(params.material_prompts)
+    material_of_episode = _episode_materials(src, episode_rows) if params.material_prompts else {}
     all_states, all_actions, new_rows = [], [], []
     for row in episode_rows:
         episode, length = row["episode_index"], row["length"]
-        if params.task_prompts:
+        if material_of_episode.get(episode) in prompt_of_material:
+            prompt = prompt_of_material[material_of_episode[episode]]
+        elif params.task_prompts:
             source_tasks = list(row["tasks"])
             if len(source_tasks) != 1 or source_tasks[0] not in prompt_of_task:
                 raise ValueError(f"episode {episode}: task {source_tasks} has no entry in task_prompts")
@@ -279,6 +288,8 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
         "fps": fps,
         "prompt": params.prompt if not params.task_prompts else None,
         "prompts": dict(params.task_prompts) if params.task_prompts else {"*": params.prompt},
+        "material_prompts": dict(params.material_prompts),
+        "materials": dict(collections.Counter(str(m) for m in material_of_episode.values())),
         "state": "6 joint positions (rad) + gripper open fraction (0 = closed, 1 = open)",
         "action": "6 Cartesian velocities / scale, clipped to [-1, 1] + gripper target (0 = close, 1 = open)",
         "params": dataclasses.asdict(params),
@@ -290,9 +301,24 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
     return contract
 
 
-def _parse_task_prompt(pair: str) -> tuple[str, str]:
+def _episode_materials(src: pathlib.Path, episode_rows: list[dict]) -> dict[int, str | None]:
+    """Episode index -> `material` tag from the snapshot `realman-train tags refresh` writes next to the data."""
+    path = src / "episode_tags.json"
+    if not path.exists():
+        raise ValueError(f"{path} is missing; material prompts need the episode tag snapshot")
+    entries = {e["episode_index"]: e for e in json.loads(path.read_text())["episodes"]}
+    materials = {}
+    for row in episode_rows:
+        entry = entries.get(row["episode_index"])
+        if entry is None or entry.get("length") != row["length"]:
+            raise ValueError(f"{path}: episode {row['episode_index']} is missing or has another length")
+        materials[row["episode_index"]] = entry.get("tags", {}).get("material")
+    return materials
+
+
+def _parse_task_prompt(pair: str, flag: str = "--task-prompt", key: str = "task") -> tuple[str, str]:
     if "=" not in pair:
-        raise ValueError(f"--task-prompt value must be 'task=prompt', got: {pair!r}")
+        raise ValueError(f"{flag} value must be '{key}=prompt', got: {pair!r}")
     return tuple(pair.split("=", 1))
 
 
@@ -313,6 +339,9 @@ class Args:
     wide_grasp_max_raw: float | None = None
     # Repeatable "recording-task=prompt" pairs for a multi-task view, e.g. pick_only="pick up the power adapter".
     task_prompt: tuple[str, ...] = ()
+    # Repeatable "material=prompt" pairs matched against the material tag in <src>/episode_tags.json, e.g.
+    # plug="pick up the plug". They win over --task-prompt.
+    material_prompt: tuple[str, ...] = ()
 
 
 def main(args: Args) -> None:
@@ -326,6 +355,9 @@ def main(args: Args) -> None:
         wide_grasp_threshold_raw=args.wide_grasp_threshold_raw,
         wide_grasp_max_raw=args.wide_grasp_max_raw,
         task_prompts=tuple(_parse_task_prompt(pair) for pair in args.task_prompt),
+        material_prompts=tuple(
+            _parse_task_prompt(pair, "--material-prompt", "material") for pair in args.material_prompt
+        ),
     )
     build_view(args.src.expanduser(), args.dst.expanduser(), params)
 

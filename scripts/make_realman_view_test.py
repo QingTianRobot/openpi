@@ -325,6 +325,55 @@ def test_multi_task_view_rejects_an_unmapped_task(tmp_path):
         mv.build_view(src, tmp_path / "view", mv.ViewParams(task_prompts=(("pick_and_place", "place it"),)))
 
 
+def _write_episode_tags(src, materials, lengths=(100, 90, 80)):
+    episodes = [
+        {"episode_index": i, "length": length, "tags": {} if m is None else {"material": m}}
+        for i, (m, length) in enumerate(zip(materials, lengths))
+    ]
+    (src / "episode_tags.json").write_text(json.dumps({"schema_version": 1, "episodes": episodes}))
+
+
+def test_material_prompt_overrides_the_task_prompt_of_tagged_episodes(tmp_path):
+    src = _make_recording(tmp_path / "recording", tasks=("pick_only",) * 3)
+    _write_episode_tags(src, ("adapter", "plug", None))
+    params = mv.ViewParams(task_prompts=(("pick_only", "pick up the power adapter"),),
+                           material_prompts=(("plug", "pick up the plug"),))
+    contract = mv.build_view(src, tmp_path / "view", params)
+
+    assert pq.read_table(tmp_path / "view" / "meta" / "tasks.parquet").to_pylist() == [
+        {"task_index": 0, "task": "pick up the power adapter"},
+        {"task_index": 1, "task": "pick up the plug"},
+    ]
+    for episode, (task_index, prompt) in enumerate(
+        [(0, "pick up the power adapter"), (1, "pick up the plug"), (0, "pick up the power adapter")]
+    ):
+        data = pq.read_table(tmp_path / "view" / "data" / "chunk-000" / f"file-{episode:03d}.parquet")
+        assert set(data["task_index"].to_pylist()) == {task_index}
+        meta = tmp_path / "view" / "meta" / "episodes" / "chunk-000" / f"file-{episode:03d}.parquet"
+        assert pq.read_table(meta).to_pylist()[0]["tasks"] == [prompt]
+    assert contract["material_prompts"] == {"plug": "pick up the plug"}
+    assert contract["materials"] == {"adapter": 1, "plug": 1, "None": 1}
+
+
+def test_material_prompt_needs_a_matching_tag_snapshot(tmp_path):
+    src = _make_recording(tmp_path / "recording")
+    params = mv.ViewParams(material_prompts=(("plug", "pick up the plug"),))
+    with pytest.raises(ValueError, match="episode_tags.json is missing"):
+        mv.build_view(src, tmp_path / "view", params)
+    _write_episode_tags(src, ("plug", "plug", "plug"), lengths=(100, 90, 81))
+    with pytest.raises(ValueError, match="episode 2 is missing or has another length"):
+        mv.build_view(src, tmp_path / "view2", params)
+
+
+def test_material_prompt_reaches_the_view_params(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(mv, "build_view", lambda src, dst, params: seen.setdefault("params", params))
+    mv.main(mv.Args(src=tmp_path / "src", dst=tmp_path / "view", material_prompt=("plug=pick up the plug",)))
+    assert seen["params"].material_prompts == (("plug", "pick up the plug"),)
+    with pytest.raises(ValueError, match="--material-prompt value must be 'material=prompt'"):
+        mv.main(mv.Args(src=tmp_path / "src", dst=tmp_path / "view", material_prompt=("plug",)))
+
+
 def test_task_prompt_without_equals_raises_value_error(tmp_path):
     src = _make_recording(tmp_path / "recording")
     with pytest.raises(ValueError, match="--task-prompt value must be"):
