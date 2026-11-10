@@ -5,8 +5,18 @@ on:
 
 jobs:
   run_tests:
-    name: Run Tests
+    name: Run Tests (${{ matrix.suite }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: models
+            args: src/openpi/models
+          - suite: library
+            args: src --ignore=src/openpi/models
+          - suite: scripts-and-client
+            args: scripts packages
     env:
       GIT_LFS_SKIP_SMUDGE: true
     steps:
@@ -27,4 +37,4 @@ jobs:
         run: uv sync --all-extras --dev
 
       - name: Run tests
-        run: uv run pytest --strict-markers -m "not manual"
+        run: uv run pytest --strict-markers -m "not manual" -v ${{ matrix.args }}
