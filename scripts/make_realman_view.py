@@ -20,6 +20,7 @@ Example:
         --dst ~/data/realman/realman_right_arm_view
 """
 
+import collections
 import dataclasses
 import datetime
 import json
@@ -49,12 +50,22 @@ class ViewParams:
     # Readings above this count as closed. None means halfway between open and closed. A gripper that closes on an
     # object stalls well below `gripper_close_raw` (about 5700 here), so do not set this close to it.
     closed_threshold_raw: float | None = None
+    # A wide grasp holds the adapter across its body at ~3600-4300, below halfway. An episode whose (smoothed)
+    # readings never pass wide_grasp_max_raw is judged at wide_grasp_threshold_raw; every other episode keeps the
+    # closed threshold, which a regrasp (reopens to ~3650) or a release cut off by the recording needs. None = off.
+    wide_grasp_threshold_raw: float | None = None
+    wide_grasp_max_raw: float | None = None
     # How many frames before the gripper starts to move the target flips. Not measured: 5 frames is 0.17 s.
     command_latency_frames: int = 5
     # Median filter window that removes single-frame reading glitches before events are located.
     smoothing_window: int = 5
     prompt: str = DEFAULT_PROMPT
     cameras: tuple[str, ...] = ("d435", "orbbec-right")
+    # Multi-task views: (recording task name, prompt) pairs. Empty means every episode gets `prompt`.
+    task_prompts: tuple[tuple[str, str], ...] = ()
+    # (material tag, prompt) pairs read from <src>/episode_tags.json; they win over task_prompts, so one recording
+    # task (pick_only) can carry a prompt per object. Episodes without a listed material keep their task prompt.
+    material_prompts: tuple[tuple[str, str], ...] = ()
 
 
 def gripper_open_fraction(raw: np.ndarray, open_raw: float, close_raw: float) -> np.ndarray:
@@ -80,6 +91,13 @@ def derive_gripper_target(
         if params.closed_threshold_raw is None
         else params.closed_threshold_raw
     )
+    if (
+        params.wide_grasp_threshold_raw is not None
+        and params.wide_grasp_max_raw is not None
+        and len(smooth)
+        and smooth.max() <= params.wide_grasp_max_raw
+    ):
+        threshold = params.wide_grasp_threshold_raw
     closed = smooth > threshold
     commanded_closed = np.full(len(smooth), closed[0])
     previous_crossing = 0
@@ -156,9 +174,26 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
 
     for sub in ("meta/episodes/chunk-000", "data/chunk-000"):
         (dst / sub).mkdir(parents=True)
+    prompts = [p for _, p in params.task_prompts] or [params.prompt]
+    for _, prompt in params.material_prompts:
+        if prompt not in prompts:
+            prompts.append(prompt)
+    prompt_of_task = dict(params.task_prompts)
+    prompt_of_material = dict(params.material_prompts)
+    material_of_episode = _episode_materials(src, episode_rows) if params.material_prompts else {}
     all_states, all_actions, new_rows = [], [], []
     for row in episode_rows:
         episode, length = row["episode_index"], row["length"]
+        if material_of_episode.get(episode) in prompt_of_material:
+            prompt = prompt_of_material[material_of_episode[episode]]
+        elif params.task_prompts:
+            source_tasks = list(row["tasks"])
+            if len(source_tasks) != 1 or source_tasks[0] not in prompt_of_task:
+                raise ValueError(f"episode {episode}: task {source_tasks} has no entry in task_prompts")
+            prompt = prompt_of_task[source_tasks[0]]
+        else:
+            prompt = params.prompt
+        task_index = prompts.index(prompt)
         source_data = (
             src / "data" / f"chunk-{row['data/chunk_index']:03d}" / f"file-{row['data/file_index']:03d}.parquet"
         )
@@ -180,7 +215,7 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
                 {
                     "observation.state": _list_column(state),
                     "action": _list_column(action),
-                    "task_index": pa.array(np.zeros(length, dtype=np.int64)),
+                    "task_index": pa.array(np.full(length, task_index, dtype=np.int64)),
                     "episode_index": pa.array(np.full(length, episode, dtype=np.int64)),
                     "frame_index": pa.array(np.arange(length, dtype=np.int64)),
                     "index": pa.array(index),
@@ -206,7 +241,7 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
                 "meta/episodes/file_index",
             )
         }
-        new["tasks"] = [params.prompt]
+        new["tasks"] = [prompt]
         for camera in params.cameras:
             base = f"videos/observation.images.{camera}/"
             for field in ("chunk_index", "file_index", "from_timestamp", "to_timestamp"):
@@ -235,8 +270,10 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
         **{f"observation.images.{c}": info["features"][f"observation.images.{c}"] for c in params.cameras},
         **{k: info["features"][k] for k in ("timestamp", "frame_index", "episode_index", "index", "task_index")},
     }
-    (dst / "meta" / "info.json").write_text(json.dumps({**info, "features": features}, indent=4))
-    pq.write_table(pa.table({"task_index": [0], "task": [params.prompt]}), dst / "meta" / "tasks.parquet")
+    (dst / "meta" / "info.json").write_text(
+        json.dumps({**info, "features": features, "total_tasks": len(prompts)}, indent=4)
+    )
+    pq.write_table(pa.table({"task_index": list(range(len(prompts))), "task": prompts}), dst / "meta" / "tasks.parquet")
     states, actions = np.concatenate(all_states), np.concatenate(all_actions)
     (dst / "meta" / "stats.json").write_text(
         json.dumps({"observation.state": _feature_stats(states), "action": _feature_stats(actions)}, indent=4)
@@ -249,7 +286,10 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
         "episodes": info["total_episodes"],
         "frames": info["total_frames"],
         "fps": fps,
-        "prompt": params.prompt,
+        "prompt": params.prompt if not params.task_prompts else None,
+        "prompts": dict(params.task_prompts) if params.task_prompts else {"*": params.prompt},
+        "material_prompts": dict(params.material_prompts),
+        "materials": dict(collections.Counter(str(m) for m in material_of_episode.values())),
         "state": "6 joint positions (rad) + gripper open fraction (0 = closed, 1 = open)",
         "action": "6 Cartesian velocities / scale, clipped to [-1, 1] + gripper target (0 = close, 1 = open)",
         "params": dataclasses.asdict(params),
@@ -261,6 +301,27 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
     return contract
 
 
+def _episode_materials(src: pathlib.Path, episode_rows: list[dict]) -> dict[int, str | None]:
+    """Episode index -> `material` tag from the snapshot `realman-train tags refresh` writes next to the data."""
+    path = src / "episode_tags.json"
+    if not path.exists():
+        raise ValueError(f"{path} is missing; material prompts need the episode tag snapshot")
+    entries = {e["episode_index"]: e for e in json.loads(path.read_text())["episodes"]}
+    materials = {}
+    for row in episode_rows:
+        entry = entries.get(row["episode_index"])
+        if entry is None or entry.get("length") != row["length"]:
+            raise ValueError(f"{path}: episode {row['episode_index']} is missing or has another length")
+        materials[row["episode_index"]] = entry.get("tags", {}).get("material")
+    return materials
+
+
+def _parse_task_prompt(pair: str, flag: str = "--task-prompt", key: str = "task") -> tuple[str, str]:
+    if "=" not in pair:
+        raise ValueError(f"{flag} value must be '{key}=prompt', got: {pair!r}")
+    return tuple(pair.split("=", 1))
+
+
 @dataclasses.dataclass
 class Args:
     src: pathlib.Path
@@ -270,6 +331,17 @@ class Args:
     linear_scale: float = 0.25
     angular_scale: float = 0.6
     command_latency_frames: int = 5
+    # Gripper readings above this count as closed; None = halfway between open and closed. Lower it when some grasps
+    # stall below halfway (a wide grasp of the adapter body holds at ~3600-4300 instead of ~5700).
+    closed_threshold_raw: float | None = None
+    # Wide grasps (see ViewParams): an episode never above --wide-grasp-max-raw is judged at --wide-grasp-threshold-raw.
+    wide_grasp_threshold_raw: float | None = None
+    wide_grasp_max_raw: float | None = None
+    # Repeatable "recording-task=prompt" pairs for a multi-task view, e.g. pick_only="pick up the power adapter".
+    task_prompt: tuple[str, ...] = ()
+    # Repeatable "material=prompt" pairs matched against the material tag in <src>/episode_tags.json, e.g.
+    # plug="pick up the plug". They win over --task-prompt.
+    material_prompt: tuple[str, ...] = ()
 
 
 def main(args: Args) -> None:
@@ -279,6 +351,13 @@ def main(args: Args) -> None:
         linear_scale=args.linear_scale,
         angular_scale=args.angular_scale,
         command_latency_frames=args.command_latency_frames,
+        closed_threshold_raw=args.closed_threshold_raw,
+        wide_grasp_threshold_raw=args.wide_grasp_threshold_raw,
+        wide_grasp_max_raw=args.wide_grasp_max_raw,
+        task_prompts=tuple(_parse_task_prompt(pair) for pair in args.task_prompt),
+        material_prompts=tuple(
+            _parse_task_prompt(pair, "--material-prompt", "material") for pair in args.material_prompt
+        ),
     )
     build_view(args.src.expanduser(), args.dst.expanduser(), params)
 

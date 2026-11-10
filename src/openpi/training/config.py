@@ -414,6 +414,34 @@ class LeRobotDobotDataConfig(DataConfigFactory):
 # 130 cleaned episodes. Change this together with the dataset.
 REALMAN_HOLDOUT_EPISODES = tuple(range(9, 130, 10))
 
+# Multi-task view (2026-10-16): 114 pick_and_place (0..113) + 103 pick_only (114..216), every 10th held out.
+REALMAN_MULTITASK_HOLDOUT_EPISODES = tuple(range(9, 217, 10))
+
+# Multi-task view v2 (2026-10-21): the v1 view (0..216, identical frames) + 111 pick_only_light-weak_1021 (217..327,
+# pick-only under weak light, prompt "pick up the power adapter"). Every 10th held out: 9..209 are v1's holdout, so
+# a run continued from the v1 model never saw any of them.
+REALMAN_MULTITASK_V2_HOLDOUT_EPISODES = tuple(range(9, 328, 10))
+
+# Pick-only view v2 (2026-10-22): the pick-only episodes of the multitask v2 clean set, without pick_and_place:
+# 103 pick_only (0..102, normal light, 10-16) + 111 pick_only_light-weak_1021 (103..213, weak light, 10-21), all with
+# the prompt "pick up the power adapter". Every 10th held out.
+REALMAN_PICK_V2_HOLDOUT_EPISODES = tuple(range(9, 214, 10))
+
+# Pick-only view v3 (2026-10-26): the v2 view (0..213; state and velocities identical, gripper labels identical except
+# 75/139/148, whose two-stage closes now flip at the first stage) + 118 new 10-26 episodes (214..331: 88 pick_only in
+# normal light, 30 pick_only_light-weak_1021 in weak light), built with closed_threshold_raw 3200 because 17 of the new
+# grasps hold the adapter body at ~3600-4300. Every 10th held out: 9..209 are v2's holdout, so a run continued from
+# the v2 model never saw any of them.
+REALMAN_PICK_V3_HOLDOUT_EPISODES = tuple(range(9, 332, 10))
+
+# Pick-only view v5 (2026-10-29): the v3 view (0..331; state and velocities identical, gripper labels identical except
+# 75/139/148/252, now judged by the per-episode wide-grasp rule) + 94 10-29 episodes picking small white plugs
+# (332..425, prompt "pick up the plug") + 99 10-29 episodes picking cables (426..524: 43 cable alone, 56 cable from a
+# mixed pile, prompt "pick up the cable"; 8 regrasps left out). Prompts come from the material tag; the recording
+# task is still pick_only. Every 10th held out: 9..329 are v3's holdout, so a run continued from the v3 model never
+# saw any of them.
+REALMAN_PICK_V5_HOLDOUT_EPISODES = tuple(range(9, 525, 10))
+
 # Output camera key -> video key in the RealMan dataset: the global D435 and the right wrist Orbbec camera.
 REALMAN_VIDEO_KEYS = {
     "observation.images.global": "observation.images.d435",
@@ -431,11 +459,11 @@ class LeRobotRealmanDataConfig(DataConfigFactory):
 
     dataset_root: str = "/datasets/lerobot_realman"
     # Train on exactly these episodes if set; `exclude_episode_indices` are removed afterwards.
-    episode_indices: Sequence[int] | None = None
-    exclude_episode_indices: Sequence[int] = REALMAN_HOLDOUT_EPISODES
+    episode_indices: tuple[int, ...] | None = None
+    exclude_episode_indices: tuple[int, ...] = REALMAN_HOLDOUT_EPISODES
     # Past the end of an episode the velocity commands are zero (stop) while the gripper target keeps its last value.
     action_padding: Literal["repeat_last", "zeros"] = "zeros"
-    action_padding_hold_dims: Sequence[int] = (6,)
+    action_padding_hold_dims: tuple[int, ...] = (6,)
     # Replaces the dataset's task text as the prompt. The prompt sent at inference time must be identical.
     prompt_override: str | None = None
 
@@ -1046,6 +1074,159 @@ _CONFIGS = [
         num_train_steps=30_000,
         save_interval=1_000,
         keep_period=10_000,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        # Same recipe as pi05_realman_action_only on the multi-task view; the prompt selects the task:
+        # "pick up the power adapter and put it in the blue bin" or "pick up the power adapter" (grasp and hold).
+        name="pi05_realman_multitask_action_only",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=16),
+        data=LeRobotRealmanDataConfig(
+            repo_id="local/realman_right_arm_multitask",
+            base_config=DataConfig(prompt_from_task=True),
+            exclude_episode_indices=REALMAN_MULTITASK_HOLDOUT_EPISODES,
+        ),
+        batch_size=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=nnx.Not(
+            nnx_utils.PathRegex(r".*(PaliGemma/llm/.*_1.*|action_in_proj|time_mlp_in|time_mlp_out|action_out_proj).*")
+        ),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        save_interval=1_000,
+        keep_period=5_000,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        # Continued training (2026-10-21): starts from the v1 multitask model (m_multitask_b16_2gpu/29999) on the v2
+        # view. Half the v1 peak LR, cosine over 100k steps (~13 epochs of v2 at batch 16); every 10k is kept so the
+        # serving checkpoint is picked by held-out eval (overfitting shows up there, not in the train loss).
+        name="pi05_realman_multitask_v2_action_only",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=16),
+        data=LeRobotRealmanDataConfig(
+            repo_id="local/realman_right_arm_multitask_v2",
+            base_config=DataConfig(prompt_from_task=True),
+            exclude_episode_indices=REALMAN_MULTITASK_V2_HOLDOUT_EPISODES,
+        ),
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2.5e-5,
+            decay_steps=100_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=nnx.Not(
+            nnx_utils.PathRegex(r".*(PaliGemma/llm/.*_1.*|action_in_proj|time_mlp_in|time_mlp_out|action_out_proj).*")
+        ),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "./checkpoints/pi05_realman_multitask_action_only/m_multitask_b16_2gpu/29999/params"
+        ),
+        num_train_steps=100_000,
+        save_interval=1_000,
+        keep_period=10_000,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        # Pick-only model (2026-10-22) for the pick-and-clear tree: the multitask model under the pick prompt sometimes
+        # carried on into the place motion (prompt swap moved its loss only 10-15%), so this one never sees
+        # pick_and_place. Fresh from pi05_base with the v1 multitask recipe (peak 5e-5, cosine 30k); every 5k kept so
+        # the serving checkpoint is picked by held-out eval.
+        name="pi05_realman_pick_v2_action_only",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=16),
+        data=LeRobotRealmanDataConfig(
+            repo_id="local/realman_right_arm_pick_v2",
+            base_config=DataConfig(prompt_from_task=True),
+            exclude_episode_indices=REALMAN_PICK_V2_HOLDOUT_EPISODES,
+        ),
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=nnx.Not(
+            nnx_utils.PathRegex(r".*(PaliGemma/llm/.*_1.*|action_in_proj|time_mlp_in|time_mlp_out|action_out_proj).*")
+        ),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        save_interval=1_000,
+        keep_period=5_000,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        # Continued training (2026-10-26): starts from the v2 pick model (p2_30k_b16_2gpu/29999, served since 10-23) on
+        # the v3 view. Half the v2 peak LR, cosine over 30k steps (~4.8 epochs of v3 at batch 16); every 5k is kept so
+        # the serving checkpoint is picked by held-out eval. Uses v2's norm stats (the initial weights were learned
+        # with them).
+        name="pi05_realman_pick_v3_action_only",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=16),
+        data=LeRobotRealmanDataConfig(
+            repo_id="local/realman_right_arm_pick_v3",
+            base_config=DataConfig(prompt_from_task=True),
+            exclude_episode_indices=REALMAN_PICK_V3_HOLDOUT_EPISODES,
+        ),
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2.5e-5,
+            decay_steps=30_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=nnx.Not(
+            nnx_utils.PathRegex(r".*(PaliGemma/llm/.*_1.*|action_in_proj|time_mlp_in|time_mlp_out|action_out_proj).*")
+        ),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "./checkpoints/pi05_realman_pick_v2_action_only/p2_30k_b16_2gpu/29999/params"
+        ),
+        num_train_steps=30_000,
+        save_interval=1_000,
+        keep_period=5_000,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        # Continued training (2026-10-29): starts from the v3 pick model (p3_30k_b16_1gpu/29999, served since 10-27) on
+        # the v5 view (adapters, plugs, cables; one prompt per material). Same schedule as v3 (~3.0 epochs of v5 at batch 16);
+        # every 5k is kept so the serving checkpoint is picked by held-out eval. Uses v3's norm stats (= v2's; the
+        # initial weights were learned with them).
+        name="pi05_realman_pick_v5_action_only",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=16),
+        data=LeRobotRealmanDataConfig(
+            repo_id="local/realman_right_arm_pick_v5",
+            base_config=DataConfig(prompt_from_task=True),
+            exclude_episode_indices=REALMAN_PICK_V5_HOLDOUT_EPISODES,
+        ),
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2.5e-5,
+            decay_steps=30_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=nnx.Not(
+            nnx_utils.PathRegex(r".*(PaliGemma/llm/.*_1.*|action_in_proj|time_mlp_in|time_mlp_out|action_out_proj).*")
+        ),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "./checkpoints/pi05_realman_pick_v3_action_only/p3_30k_b16_1gpu/29999/params"
+        ),
+        num_train_steps=30_000,
+        save_interval=1_000,
+        keep_period=5_000,
         wandb_enabled=False,
     ),
     TrainConfig(
