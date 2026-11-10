@@ -39,5 +39,22 @@ jobs:
       - name: Install the project
         run: uv sync --all-extras --dev
 
+      - name: Run model tests
+        if: matrix.suite == 'models'
+        run: |
+          uv run python -u - --strict-markers -m "not manual" -v ${{ matrix.args }} <<'PY'
+          import os
+          import sys
+
+          import pytest
+
+          # The hosted CPU job can hang during native interpreter shutdown after pytest finishes.
+          result = pytest.main(sys.argv[1:])
+          sys.stdout.flush()
+          sys.stderr.flush()
+          os._exit(int(result))
+          PY
+
       - name: Run tests
+        if: matrix.suite != 'models'
         run: uv run pytest --strict-markers -m "not manual" -v ${{ matrix.args }}
