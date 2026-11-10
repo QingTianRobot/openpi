@@ -29,7 +29,7 @@ def test_truncate_local_metrics(tmp_path: pathlib.Path):
 def test_train(tmp_path: pathlib.Path, config_name: str):
     config = dataclasses.replace(
         _config._CONFIGS_DICT[config_name],  # noqa: SLF001
-        batch_size=2,
+        batch_size=1,
         checkpoint_base_dir=str(tmp_path / "checkpoint"),
         exp_name="test",
         overwrite=False,

@@ -18,7 +18,7 @@ jobs:
           - suite: scripts-and-client
             args: scripts packages --ignore=scripts/train_test.py
           - suite: training
-            args: scripts/train_test.py
+            args: scripts/train_test.py --log-cli-level=INFO
     env:
       GIT_LFS_SKIP_SMUDGE: true
       JAX_PLATFORMS: cpu
