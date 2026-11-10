@@ -6,6 +6,7 @@ import pytest
 
 os.environ["JAX_PLATFORMS"] = "cpu"
 
+from openpi.models import siglip as _siglip
 from openpi.training import config as _config
 
 from . import train
@@ -26,7 +27,11 @@ def test_truncate_local_metrics(tmp_path: pathlib.Path):
 
 
 @pytest.mark.parametrize("config_name", ["debug"])
-def test_train(tmp_path: pathlib.Path, config_name: str):
+def test_train(tmp_path: pathlib.Path, config_name: str, monkeypatch: pytest.MonkeyPatch):
+    # The smoke test exercises training and checkpoint resume on a CPU runner.
+    vision_config = _siglip.decode_variant("mu/14")
+    monkeypatch.setattr(_siglip, "decode_variant", lambda _: vision_config)
+
     config = dataclasses.replace(
         _config._CONFIGS_DICT[config_name],  # noqa: SLF001
         batch_size=2,
