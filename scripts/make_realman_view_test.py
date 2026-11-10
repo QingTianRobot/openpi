@@ -67,14 +67,17 @@ def test_a_hold_just_above_halfway_does_not_flicker():
     # 2026-10-26 raw #462 held at 4262-4279.
     raw = np.concatenate([np.full(60, 50.0), np.tile(np.repeat([4279.0, 4262.0], 20), 3)])
     target = mv.derive_gripper_target(raw, WIDE)
-    assert set(target[:59]) == {1.0} and set(target[61:]) == {0.0}
+    assert set(target[:59]) == {1.0}
+    assert set(target[61:]) == {0.0}
 
 
 def test_a_release_cut_off_by_the_recording_still_opens():
     # raw #39/#83/#119: the recording ends while the gripper opens (last readings ~3700).
     raw = np.concatenate([np.full(60, 50.0), np.full(100, 7900.0), np.linspace(7900, 3700, 8)])
     target = mv.derive_gripper_target(raw, WIDE)
-    assert target[0] == 1 and target[100] == 0 and target[-1] == 1
+    assert target[0] == 1
+    assert target[100] == 0
+    assert target[-1] == 1
 
 
 def test_a_partial_reopen_of_a_normal_grasp_is_a_second_close():
@@ -328,7 +331,7 @@ def test_multi_task_view_rejects_an_unmapped_task(tmp_path):
 def _write_episode_tags(src, materials, lengths=(100, 90, 80)):
     episodes = [
         {"episode_index": i, "length": length, "tags": {} if m is None else {"material": m}}
-        for i, (m, length) in enumerate(zip(materials, lengths))
+        for i, (m, length) in enumerate(zip(materials, lengths, strict=True))
     ]
     (src / "episode_tags.json").write_text(json.dumps({"schema_version": 1, "episodes": episodes}))
 
@@ -336,8 +339,10 @@ def _write_episode_tags(src, materials, lengths=(100, 90, 80)):
 def test_material_prompt_overrides_the_task_prompt_of_tagged_episodes(tmp_path):
     src = _make_recording(tmp_path / "recording", tasks=("pick_only",) * 3)
     _write_episode_tags(src, ("adapter", "plug", None))
-    params = mv.ViewParams(task_prompts=(("pick_only", "pick up the power adapter"),),
-                           material_prompts=(("plug", "pick up the plug"), ("cable", "pick up the plug")))
+    params = mv.ViewParams(
+        task_prompts=(("pick_only", "pick up the power adapter"),),
+        material_prompts=(("plug", "pick up the plug"), ("cable", "pick up the plug")),
+    )
     contract = mv.build_view(src, tmp_path / "view", params)
 
     assert pq.read_table(tmp_path / "view" / "meta" / "tasks.parquet").to_pylist() == [
@@ -385,11 +390,16 @@ def test_closed_threshold_reaches_the_view_params(tmp_path, monkeypatch):
     monkeypatch.setattr(mv, "build_view", lambda src, dst, params: seen.setdefault("params", params))
     mv.main(
         mv.Args(
-            src=tmp_path / "src", dst=tmp_path / "view", closed_threshold_raw=4275.0,
-            wide_grasp_threshold_raw=3200.0, wide_grasp_max_raw=4575.0,
+            src=tmp_path / "src",
+            dst=tmp_path / "view",
+            closed_threshold_raw=4275.0,
+            wide_grasp_threshold_raw=3200.0,
+            wide_grasp_max_raw=4575.0,
         )
     )
     params = seen["params"]
     assert (params.closed_threshold_raw, params.wide_grasp_threshold_raw, params.wide_grasp_max_raw) == (
-        4275.0, 3200.0, 4575.0,
+        4275.0,
+        3200.0,
+        4575.0,
     )

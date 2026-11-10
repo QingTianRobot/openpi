@@ -273,9 +273,7 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
     (dst / "meta" / "info.json").write_text(
         json.dumps({**info, "features": features, "total_tasks": len(prompts)}, indent=4)
     )
-    pq.write_table(
-        pa.table({"task_index": list(range(len(prompts))), "task": prompts}), dst / "meta" / "tasks.parquet"
-    )
+    pq.write_table(pa.table({"task_index": list(range(len(prompts))), "task": prompts}), dst / "meta" / "tasks.parquet")
     states, actions = np.concatenate(all_states), np.concatenate(all_actions)
     (dst / "meta" / "stats.json").write_text(
         json.dumps({"observation.state": _feature_stats(states), "action": _feature_stats(actions)}, indent=4)
