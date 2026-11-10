@@ -938,9 +938,7 @@ _CONFIGS = [
         # Freeze SigLIP and the PaliGemma language backbone. Train the action
         # expert plus the action/timestep projection heads only.
         freeze_filter=nnx.Not(
-            nnx_utils.PathRegex(
-                r".*(PaliGemma/llm/.*_1.*|action_in_proj|time_mlp_in|time_mlp_out|action_out_proj).*"
-            )
+            nnx_utils.PathRegex(r".*(PaliGemma/llm/.*_1.*|action_in_proj|time_mlp_in|time_mlp_out|action_out_proj).*")
         ),
         ema_decay=None,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
@@ -965,9 +963,7 @@ _CONFIGS = [
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         freeze_filter=nnx.Not(
-            nnx_utils.PathRegex(
-                r".*(PaliGemma/llm/.*_1.*|action_in_proj|time_mlp_in|time_mlp_out|action_out_proj).*"
-            )
+            nnx_utils.PathRegex(r".*(PaliGemma/llm/.*_1.*|action_in_proj|time_mlp_in|time_mlp_out|action_out_proj).*")
         ),
         ema_decay=None,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
@@ -992,9 +988,7 @@ _CONFIGS = [
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         freeze_filter=nnx.Not(
-            nnx_utils.PathRegex(
-                r".*(PaliGemma/llm/.*_1.*|action_in_proj|time_mlp_in|time_mlp_out|action_out_proj).*"
-            )
+            nnx_utils.PathRegex(r".*(PaliGemma/llm/.*_1.*|action_in_proj|time_mlp_in|time_mlp_out|action_out_proj).*")
         ),
         ema_decay=None,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
