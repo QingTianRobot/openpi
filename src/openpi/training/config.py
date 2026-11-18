@@ -1082,6 +1082,35 @@ _CONFIGS = [
         wandb_enabled=False,
     ),
     TrainConfig(
+        # Pipeline smoke test of the realman training console (a 3-episode view): the pi05_realman_action_only recipe
+        # with episode 2 held out, 20 steps and its own norm stats (asset id local/realman_smoke), so it never touches
+        # the real config's stats or checkpoints. Not for real training.
+        name="pi05_realman_smoke",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=16),
+        data=LeRobotRealmanDataConfig(
+            repo_id="local/realman_smoke",
+            base_config=DataConfig(prompt_from_task=True),
+            exclude_episode_indices=(2,),
+        ),
+        batch_size=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=5,
+            peak_lr=5e-5,
+            decay_steps=20,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=nnx.Not(
+            nnx_utils.PathRegex(r".*(PaliGemma/llm/.*_1.*|action_in_proj|time_mlp_in|time_mlp_out|action_out_proj).*")
+        ),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=20,
+        save_interval=10,
+        keep_period=None,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
         # Same recipe as pi05_realman_action_only on the multi-task view; the prompt selects the task:
         # "pick up the power adapter and put it in the blue bin" or "pick up the power adapter" (grasp and hold).
         name="pi05_realman_multitask_action_only",
