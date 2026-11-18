@@ -444,9 +444,9 @@ REALMAN_PICK_V3_HOLDOUT_EPISODES = tuple(range(9, 332, 10))
 REALMAN_PICK_V5_HOLDOUT_EPISODES = tuple(range(9, 525, 10))
 
 # SJDrealman left-arm view v1 (2026-11-18): Pika-teleoperated pick_and_place with the LEFT arm and the left wrist
-# Orbbec camera, recorded on SJDrealman 11-17/11-18. Every 10th of the first 100 episodes held out, so the clean set
-# must keep at least 100 episodes (the console refuses a view that lacks a held-out episode).
-REALMAN_SJD_LEFT_V1_HOLDOUT_EPISODES = tuple(range(9, 100, 10))
+# Orbbec camera, recorded on SJDrealman 11-17/11-18. The view has 87 episodes (0..86): every 10th held out, 9..79.
+# The console refuses a view that lacks a held-out episode, so a smaller view needs a new config.
+REALMAN_SJD_LEFT_V1_HOLDOUT_EPISODES = tuple(range(9, 87, 10))
 
 
 def realman_video_keys(wrist_camera: str = "orbbec-right") -> dict[str, str]:
