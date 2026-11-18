@@ -3,7 +3,7 @@
 The recording stores three arms with canonical, model-independent features. The pi0.5 pipeline needs two plain
 columns instead, so this script writes a new dataset directory next to the recording with
 
-  observation.state  (7)  right arm joints (rad) + gripper opening 0..1 (0 = closed, 1 = open)
+  observation.state  (7)  the chosen arm's joints (rad) + gripper opening 0..1 (0 = closed, 1 = open)
   action             (7)  6 Cartesian velocities divided by the scale policy_bridge multiplies back
                           (linear / 0.25 m/s, angular / 0.6 rad/s, clipped to [-1, 1]) + gripper target (0 or 1)
 
@@ -34,6 +34,8 @@ import pyarrow.parquet as pq
 import tyro
 
 ARM_INDEX = {"l": 0, "m": 1, "r": 2}
+# Each arm's wrist camera in the recording; the global camera is always the D435.
+WRIST_CAMERA = {"l": "orbbec-left", "m": "orbbec-middle", "r": "orbbec-right"}
 QUANTILES = {"q01": 0.01, "q10": 0.10, "q50": 0.50, "q90": 0.90, "q99": 0.99}
 DEFAULT_PROMPT = "pick up the power adapter and put it in the blue bin"
 
@@ -60,7 +62,8 @@ class ViewParams:
     # Median filter window that removes single-frame reading glitches before events are located.
     smoothing_window: int = 5
     prompt: str = DEFAULT_PROMPT
-    cameras: tuple[str, ...] = ("d435", "orbbec-right")
+    # None = the D435 plus the arm's own wrist camera (WRIST_CAMERA).
+    cameras: tuple[str, ...] | None = None
     # Multi-task views: (recording task name, prompt) pairs. Empty means every episode gets `prompt`.
     task_prompts: tuple[tuple[str, str], ...] = ()
     # (material tag, prompt) pairs read from <src>/episode_tags.json; they win over task_prompts, so one recording
@@ -158,7 +161,8 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
     if info.get("codebase_version") != "v3.0":
         raise ValueError(f"Expected a LeRobot v3.0 recording, got {info.get('codebase_version')!r}")
     fps = info["fps"]
-    for camera in params.cameras:
+    cameras = params.cameras or ("d435", WRIST_CAMERA[params.arm])
+    for camera in cameras:
         if f"observation.images.{camera}" not in info["features"]:
             raise ValueError(f"camera {camera!r} is not in the recording: {sorted(info['features'])}")
 
@@ -242,7 +246,7 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
             )
         }
         new["tasks"] = [prompt]
-        for camera in params.cameras:
+        for camera in cameras:
             base = f"videos/observation.images.{camera}/"
             for field in ("chunk_index", "file_index", "from_timestamp", "to_timestamp"):
                 new[base + field] = row[base + field]
@@ -267,7 +271,7 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
             "shape": [7],
             "names": ["vx", "vy", "vz", "wx", "wy", "wz", "gripper_target"],
         },
-        **{f"observation.images.{c}": info["features"][f"observation.images.{c}"] for c in params.cameras},
+        **{f"observation.images.{c}": info["features"][f"observation.images.{c}"] for c in cameras},
         **{k: info["features"][k] for k in ("timestamp", "frame_index", "episode_index", "index", "task_index")},
     }
     (dst / "meta" / "info.json").write_text(
@@ -283,6 +287,7 @@ def build_view(src: pathlib.Path, dst: pathlib.Path, params: ViewParams) -> dict
         "source": str(src),
         "script": "scripts/make_realman_view.py",
         "arm": params.arm,
+        "cameras": list(cameras),
         "episodes": info["total_episodes"],
         "frames": info["total_frames"],
         "fps": fps,

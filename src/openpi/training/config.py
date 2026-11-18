@@ -443,11 +443,21 @@ REALMAN_PICK_V3_HOLDOUT_EPISODES = tuple(range(9, 332, 10))
 # saw any of them.
 REALMAN_PICK_V5_HOLDOUT_EPISODES = tuple(range(9, 525, 10))
 
-# Output camera key -> video key in the RealMan dataset: the global D435 and the right wrist Orbbec camera.
-REALMAN_VIDEO_KEYS = {
-    "observation.images.global": "observation.images.d435",
-    "observation.images.wrist": "observation.images.orbbec-right",
-}
+# SJDrealman left-arm view v1 (2026-11-18): Pika-teleoperated pick_and_place with the LEFT arm and the left wrist
+# Orbbec camera, recorded on SJDrealman 11-17/11-18. Every 10th of the first 100 episodes held out, so the clean set
+# must keep at least 100 episodes (the console refuses a view that lacks a held-out episode).
+REALMAN_SJD_LEFT_V1_HOLDOUT_EPISODES = tuple(range(9, 100, 10))
+
+
+def realman_video_keys(wrist_camera: str = "orbbec-right") -> dict[str, str]:
+    """Output camera key -> video key in the RealMan dataset: the global D435 and one arm's wrist Orbbec camera."""
+    return {
+        "observation.images.global": "observation.images.d435",
+        "observation.images.wrist": f"observation.images.{wrist_camera}",
+    }
+
+
+REALMAN_VIDEO_KEYS = realman_video_keys()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -471,6 +481,8 @@ class LeRobotRealmanDataConfig(DataConfigFactory):
     action_padding_hold_dims: tuple[int, ...] = (6,)
     # Replaces the dataset's task text as the prompt. The prompt sent at inference time must be identical.
     prompt_override: str | None = None
+    # The wrist camera of the trained arm (the view keeps the recording's camera names).
+    wrist_camera: str = "orbbec-right"
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -494,7 +506,7 @@ class LeRobotRealmanDataConfig(DataConfigFactory):
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
             dataset_root=self.dataset_root,
-            video_keys=REALMAN_VIDEO_KEYS,
+            video_keys=realman_video_keys(self.wrist_camera),
             episode_indices=self.episode_indices,
             exclude_episode_indices=self.exclude_episode_indices,
             action_padding=self.action_padding,
@@ -1232,6 +1244,36 @@ _CONFIGS = [
         num_train_steps=30_000,
         save_interval=1_000,
         keep_period=5_000,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        # pi05_realman_action_only's recipe on the SJDrealman LEFT-arm view (make_realman_view.py --arm l, cameras
+        # d435 + orbbec-left), from pi05_base. Batch 16 for 2 GPUs. keep_period=None keeps only the latest checkpoint
+        # (~9 GB each): the campus training host has little disk.
+        name="pi05_realman_sjd_left_v1_action_only",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=16),
+        data=LeRobotRealmanDataConfig(
+            repo_id="local/realman_sjd_left_arm_v1",
+            base_config=DataConfig(prompt_from_task=True),
+            exclude_episode_indices=REALMAN_SJD_LEFT_V1_HOLDOUT_EPISODES,
+            wrist_camera="orbbec-left",
+        ),
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=nnx.Not(
+            nnx_utils.PathRegex(r".*(PaliGemma/llm/.*_1.*|action_in_proj|time_mlp_in|time_mlp_out|action_out_proj).*")
+        ),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        save_interval=1_000,
+        keep_period=None,
         wandb_enabled=False,
     ),
     TrainConfig(
