@@ -3,6 +3,7 @@
 import abc
 from collections.abc import Mapping, Sequence
 import dataclasses
+import os
 import difflib
 import logging
 import pathlib
@@ -457,7 +458,11 @@ class LeRobotRealmanDataConfig(DataConfigFactory):
     `action` (6 normalized Cartesian velocities + gripper target) next to the original recording.
     """
 
-    dataset_root: str = "/datasets/lerobot_realman"
+    # The docker compose overlay mounts the view here; without docker (uv venv on a shared GPU host) the training
+    # console sets OPENPI_REALMAN_DATASET_DIR to the view itself.
+    dataset_root: str = dataclasses.field(
+        default_factory=lambda: os.environ.get("OPENPI_REALMAN_DATASET_DIR", "/datasets/lerobot_realman")
+    )
     # Train on exactly these episodes if set; `exclude_episode_indices` are removed afterwards.
     episode_indices: tuple[int, ...] | None = None
     exclude_episode_indices: tuple[int, ...] = REALMAN_HOLDOUT_EPISODES
