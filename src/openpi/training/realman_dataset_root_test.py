@@ -22,6 +22,6 @@ def test_sjd_left_config_reads_the_left_wrist_camera():
         "observation.images.global": "observation.images.d435",
         "observation.images.wrist": "observation.images.orbbec-left",
     }
-    assert train.data.exclude_episode_indices == tuple(range(9, 100, 10))
+    assert train.data.exclude_episode_indices == tuple(range(9, 87, 10))
     assert train.keep_period is None
     assert train.batch_size == 16
