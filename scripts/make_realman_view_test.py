@@ -295,6 +295,20 @@ def test_view_is_readable_by_the_loader_and_has_the_derived_values(built):
     assert all(dataset[i]["action"][0, 6] == 1 for i in dataset.indices_for(2))
 
 
+def test_left_arm_view_uses_the_left_wrist_camera(tmp_path):
+    src = _make_recording(tmp_path / "recording")
+    dst = tmp_path / "view_left"
+    contract = mv.build_view(src, dst, mv.ViewParams(arm="l"))
+
+    info = json.loads((dst / "meta" / "info.json").read_text())
+    assert "observation.images.orbbec-left" in info["features"]
+    assert "observation.images.orbbec-right" not in info["features"]
+    assert contract["arm"] == "l"
+    assert contract["cameras"] == ["d435", "orbbec-left"]
+    assert (dst / "videos" / "observation.images.orbbec-left").exists()
+    assert not (dst / "videos" / "observation.images.orbbec-right").exists()
+
+
 def test_existing_destination_and_unknown_camera_are_rejected(built, tmp_path):
     src, dst, _ = built
     with pytest.raises(FileExistsError):
